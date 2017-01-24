@@ -37,4 +37,4 @@ mod_protein <- data_frame(uniprot_ac = rep(hs_fasta$uniprot_ac, nb_mods),
 #                               mod_res = unlist(mod_residues), 
 #                               mod_idx = unlist(mod_indices))
 
-# save.image("~/Projects/NEU/ptm/dev/annot_uniprot.RData")
+# save.image("output/annot_uniprot.RData")

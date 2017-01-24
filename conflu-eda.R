@@ -1,5 +1,6 @@
 ## load required packages -------------------------------------------
 library(readr)
+library(tibble)
 library(tidyr)
 library(dplyr)
 library(ggplot2)
@@ -7,13 +8,13 @@ library(stringr)
 
 
 ## set up working directory and load datasets -----------------------
-work_dir <- "/Users/thtsai/Projects/NEU/ptm/dev/"
-data_dir <- "/Users/thtsai/Projects/NEU/ptm/data/CCCP_confluency/"
-setwd(work_dir)
+# work_dir <- "/Users/thtsai/Projects/NEU/ptm/dev/"
+# data_dir <- "/Users/thtsai/Projects/NEU/ptm/data/CCCP_confluency/"
+# setwd(work_dir)
 
 
 ## vista outputs
-df_design <- read.table(paste0(data_dir, "CellDensity_tft_forTH.txt"), 
+df_design <- read.table("data/CCCP_confluency/CellDensity_tft_forTH.txt", 
                         header = TRUE, sep = "\t", stringsAsFactors = FALSE)
 
 file_name <- paste0("vistaga_", df_design$run_id, ".txt")
@@ -25,22 +26,22 @@ sub_cols <- c("Reference", "run_id", "peptide_id", "vista_peak_area_light",
 
 dta_conflu <- vector("list", length(file_name))
 for (i in seq_along(file_name)) {
-    file_path <- paste0(data_dir, file_name[i])
+    file_path <- paste0("data/CCCP_confluency/", file_name[i])
     dta_conflu[[i]] <- read.table(file_path, header = TRUE, sep = "\t", fill = TRUE, stringsAsFactors = FALSE) %>% 
         tbl_df() %>% select_(.dots = sub_cols)
 }
 dta_conflu <- bind_rows(dta_conflu)
 rm(list = c("i", "file_name", "file_path"))
 
-
+# save.image("output/dta_conflu.RData")
 # save.image("~/Projects/NEU/ptm/dev/dta_conflu.RData")
 
 
 ## starting workflow ------------------------------------------------
 ## load dataset
-work_dir <- "/Users/thtsai/Projects/NEU/ptm/dev/"
-setwd(work_dir)
-load("~/Projects/NEU/ptm/dev/dta_conflu.RData")
+# work_dir <- "/Users/thtsai/Projects/NEU/ptm/dev/"
+# setwd(work_dir)
+load("output/dta_conflu.RData")
 
 dta_conflu <- dta_conflu %>% 
     filter(vista_confidence_score >= 83)
@@ -66,7 +67,7 @@ df_design <- df_design %>%
 
 
 ## data annotation and filtering ------------------------------------
-## TODO: need a closer look at `Reference` & `label1`
+## [TODO]: need a closer look at `Reference` & `label1`
 dta_conflu <- dta_conflu %>% 
     mutate(is_mod = grepl("\\*", peptide_sequence), 
            feature = paste(peptide_sequence, ms2_charge, sep = "_"), 
@@ -76,16 +77,22 @@ dta_conflu <- dta_conflu %>%
            techrep = plyr::mapvalues(run_id, from = df_design$run_id, to = df_design$techrep), 
            run_cbt = plyr::mapvalues(run_id, from = df_design$run_id, to = df_design$run_cbt))
 
-## preliminary filtering
-# dta_conflu %>% filter(is.na(ms2_charge))
-# dta_conflu %>% filter(grepl("-\\..$", peptide_sequence))
+## features with no charge state or retention time inforamtion
+# dta_conflu %>% filter(is.na(ms2_charge) | is.na(ms2_rt)) %>%
+#     select(feature, peptide_sequence, ms2_charge, ms2_rt)
 
+## short matches
+# dta_conflu %>% filter(grepl("-\\..$", peptide_sequence)) %>%
+#     select(feature, peptide_sequence)
+
+## not belonging to expected uniprot ID
 regex_uniprot <- ".*([OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}).*"
 # dta_conflu %>% filter(!grepl(pattern = regex_uniprot, Reference))
 
-## same as `filter(dta_conflu, !is.na(ms2_charge))`
-dta_conflu <- dta_conflu %>% 
-    filter(!is.na(ms2_charge), !grepl("-\\..$", peptide_sequence), grepl(regex_uniprot, Reference))
+## preliminary filtering
+dta_conflu <- dta_conflu %>%
+    filter(!is.na(ms2_charge), !is.na(ms2_rt), !grepl("-\\..$", peptide_sequence), grepl(regex_uniprot, Reference))
+
 
 ## extract uniprot accession number
 uniq_ref <- dta_conflu %>% distinct(Reference) %>% .$Reference
