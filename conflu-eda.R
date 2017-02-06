@@ -70,22 +70,29 @@ dta_conflu <- dta_conflu %>%
 
 # Extract original peptide sequence & other information
 df_pep <- dta_conflu %>% 
-    distinct(peptide_sequence) %>% 
+    distinct(peptide_sequence, is_mod) %>% 
     mutate(unmod_peptide = str_replace_all(peptide_sequence, "\\*", ""), 
            trim_peptide = str_match(unmod_peptide, regex("\\.[ACDEFGHIKLMNPQRSTVWY]+")) %>% 
                str_replace("\\.", ""), 
            nb_aa = str_length(trim_peptide))
 
-# Ensure each peptide was extracted correctly
+# Make sure each peptide was extracted correctly
 # df_pep %>% filter(is.na(nb_aa) | nb_aa == 0)
+
+# Retain peptides with length >= 6
+df_pep <- df_pep %>% filter(nb_aa >= 6)
+
+# Determine the pairing status of peptide
+df_pep <- df_pep %>% group_by(unmod_peptide) %>% 
+    mutate(is_paired = ifelse(n_distinct(is_mod) == 2, TRUE, FALSE)) %>% 
+    ungroup()
 
 # Features with no charge state or retention time inforamtion
 # dta_conflu %>% filter(is.na(ms2_charge) | is.na(ms2_rt)) %>%
 #     select(feature, peptide_sequence, ms2_charge, ms2_rt)
 
-# Short matches (minimum acceptable length of 6 AAs)
-# dta_conflu %>% semi_join(filter(df_pep, nb_aa < 6)) %>% 
-#     distinct(peptide_sequence, feature)
+# Short matches (peptide length less than 6 AAs)
+# dta_conflu %>% anti_join(df_pep) %>% distinct(peptide_sequence, feature)
 
 # Unexpected uniprot ID (non-human proteins in this case)
 # regex_uniprot <- ".*([OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}).*"
@@ -93,8 +100,8 @@ df_pep <- dta_conflu %>%
 
 # Initial filtering
 regex_uniprot <- ".*([OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}).*"
-dta_conflu <- dta_conflu %>%
-    semi_join(filter(df_pep, !(nb_aa < 6))) %>% 
+dta_conflu <- dta_conflu %>% 
+    semi_join(df_pep) %>% 
     filter(!is.na(ms2_charge), !is.na(ms2_rt), grepl(regex_uniprot, Reference))
 
 # Extract uniprot accession number
@@ -105,9 +112,6 @@ dta_conflu <- dta_conflu %>%
 
 
 # Data exploration --------------------------------------------------------
-# Proportion of modified/unmodified peptides in each run
-table(dta_conflu$run_cbt, dta_conflu$is_mod)
-
 # Check for duplicate features (4971 in total)
 dta_conflu %>% 
     count(run_id, feature) %>% ungroup() %>% 
@@ -136,6 +140,8 @@ dta_conflu %>% select(uniprot_ac, peptide_sequence) %>% distinct() %>%
     group_by(peptide_sequence) %>% mutate(nb_prot = n()) %>% ungroup() %>% 
     filter(nb_prot > 1) %>% arrange(peptide_sequence)
 
+# 592 peptides have modified/unmodified counterparts
+df_pep %>% filter(is_paired, !is_mod) %>% distinct(unmod_peptide)
 
 
 # Data manipulation & transformation --------------------------------------
@@ -147,215 +153,296 @@ dta_conflu <- dta_conflu %>%
     ungroup()
 
 # Remove peptides with ambiguous matches (to >1 uniprot_ac) for now
+# pep2uniprot <- dta_conflu %>% 
+#     distinct(peptide_sequence, uniprot_ac) %>% 
+#     count(peptide_sequence)
+
+# Remove peptides with ambiguous matches (to >1 Reference): more stringent than 
+# mapping with uniprot_ac, as multiple Reference may map to the same uniprot_ac
+# Example: dta_conflu %>% filter(feature == "K.AFSLK*TSTSAVR.H_3", run_cbt == "CCCP_Light-B1T1")
 pep2uniprot <- dta_conflu %>% 
-    distinct(peptide_sequence, uniprot_ac) %>% 
+    distinct(peptide_sequence, Reference) %>% 
     count(peptide_sequence)
 
 dta_conflu <- dta_conflu %>% 
     semi_join(filter(pep2uniprot, n == 1))
 
-# normalization (equalizing median)
-med_run <- dta_conflu %>% 
-    group_by(run_id) %>% 
-    summarise(log2inty_med = median(log2inty, na.rm = TRUE)) %>% 
-    mutate(log2inty_ref = median(log2inty_med, na.rm = TRUE))
-
+# Status of peptide pairing & protein normalization
 dta_conflu <- dta_conflu %>% 
-    left_join(med_run) %>% 
-    mutate(log2inty_eqmed = log2inty - log2inty_med + log2inty_ref) %>% 
-    select(-log2inty_med, -log2inty_ref)
+    left_join(select(df_pep, peptide_sequence, unmod_peptide, is_paired)) %>% 
+    group_by(uniprot_ac) %>% 
+    mutate(is_ref = any(!is_paired & !is_mod)) %>% ungroup()
+
+# More than 70% of the modified peptides might be eligible for protein normalization
+dta_conflu %>% distinct(peptide_sequence, is_mod, is_ref) %>% count(is_mod, is_ref)
+
+# Subset with features observed in both batches
+ftr_2b <- dta_conflu %>% 
+    distinct(feature, biorep) %>% group_by(feature) %>% 
+    filter(all(c("B1", "B2") %in% biorep)) %>% ungroup() %>% 
+    distinct(feature)
+
+# Subset with feature consistently absent/present in both batches
+ftr_2bc <- dta_conflu %>% 
+    distinct(feature, cond, biorep) %>% 
+    group_by(feature, cond) %>% 
+    mutate(match = all(c("B1", "B2") %in% biorep)) %>% 
+    group_by(feature) %>% 
+    filter(all(match)) %>% ungroup() %>% 
+    distinct(feature)
+
+dta_conflu_2b <- dta_conflu %>% semi_join(ftr_2b)
+dta_conflu_2bc <- dta_conflu %>% semi_join(ftr_2bc)
+
+# Normalization (equalizing median) - not appropriate
+# med_run <- dta_conflu %>% 
+#     group_by(run_id) %>% 
+#     summarise(log2inty_med = median(log2inty, na.rm = TRUE)) %>% 
+#     mutate(log2inty_ref = median(log2inty_med, na.rm = TRUE))
+# 
+# dta_conflu <- dta_conflu %>% 
+#     left_join(med_run) %>% 
+#     mutate(log2inty_eqmed = log2inty - log2inty_med + log2inty_ref) %>% 
+#     select(-log2inty_med, -log2inty_ref)
 
 
-## visualization ----------------------------------------------------
-## QC plot (boxplot)
-ggplot(dta_conflu, aes(run_cbt, log2inty)) + 
+# Visualization -----------------------------------------------------------
+# QC plot (boxplot)
+dta_conflu %>% 
+    mutate(is_mod_fac = factor(ifelse(is_mod, "Modified", "Unmodified"))) %>% 
+    ggplot(aes(run_cbt, log2inty)) + 
     geom_boxplot(aes(fill = biorep)) + 
-    facet_wrap(~ is_mod) + 
-    theme(axis.text.x = element_text(angle = 90, hjust = 1))
+    facet_wrap(~ is_mod_fac) + 
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+    labs(x = "Run", y = "Log2-intensity")
 
-ggplot(dta_conflu, aes(run_cbt, log2inty_eqmed)) + 
+dta_conflu_2b %>% 
+    mutate(is_mod_fac = factor(ifelse(is_mod, "Modified", "Unmodified"))) %>% 
+    ggplot(aes(run_cbt, log2inty)) + 
     geom_boxplot(aes(fill = biorep)) + 
-    facet_wrap(~ is_mod) + 
-    theme(axis.text.x = element_text(angle = 90, hjust = 1))
+    facet_wrap(~ is_mod_fac) + 
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+    labs(x = "Run", y = "Log2-intensity")
 
+dta_conflu_2bc %>% 
+    mutate(is_mod_fac = factor(ifelse(is_mod, "Modified", "Unmodified"))) %>% 
+    ggplot(aes(run_cbt, log2inty)) + 
+    geom_boxplot(aes(fill = biorep)) + 
+    facet_wrap(~ is_mod_fac) + 
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+    labs(x = "Run", y = "Log2-intensity")
 
-## proportion of modified peptide features
+# ggplot(dta_conflu, aes(run_cbt, log2inty_eqmed)) + 
+#     geom_boxplot(aes(fill = biorep)) + 
+#     facet_wrap(~ is_mod) + 
+#     theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Number of modified/unmodified features
+# This suggests a discrepancy in the enrichment step across batches
 dta_conflu %>% 
     group_by(cond, biorep, run_cbt) %>% 
-    summarise(p_mod = sum(is_mod) / n()) %>% 
+    summarise(Modified = sum(is_mod), Unmodified = sum(!is_mod)) %>% 
     ungroup() %>% 
-    ggplot(aes(cond, p_mod)) + 
-    geom_jitter(aes(colour = biorep), width = 0.1, size = 4) + 
-    labs(x = "Condition", y = "Proportion of modified features")
-
-## number of features
-dta_conflu %>% 
-    group_by(cond, biorep, run_cbt) %>% 
-    summarise(nb_feature = n()) %>% 
-    ungroup() %>% 
-    ggplot(aes(cond, nb_feature)) + 
-    geom_jitter(aes(colour = biorep), width = 0.1, size = 4) + 
-    labs(x = "Condition", y = "Number of features")
-
-## number of modified/unmodified features
-dta_conflu %>% 
-    group_by(cond, biorep, run_cbt) %>% 
-    summarise(modified = sum(is_mod), unmodified = sum(!is_mod)) %>% 
-    ungroup() %>% 
-    gather(mod, nb_feature, modified:unmodified) %>% 
+    gather(mod, nb_feature, Modified:Unmodified) %>% 
     ggplot(aes(cond, nb_feature)) + 
     geom_jitter(aes(colour = biorep, shape = mod), width = 0.1, size = 4) + 
     labs(x = "Condition", y = "Number of features")
 
-# ## number of features for modified peptides
+# Number of modified/unmodified peptides
+dta_conflu %>% 
+    distinct(cond, biorep, run_cbt, peptide_sequence, is_mod) %>% 
+    group_by(cond, biorep, run_cbt) %>% 
+    summarise(Modified = sum(is_mod), Unmodified = sum(!is_mod)) %>% 
+    ungroup() %>% 
+    gather(mod, nb_peptide, Modified:Unmodified) %>% 
+    ggplot(aes(cond, nb_peptide)) + 
+    geom_jitter(aes(colour = biorep, shape = mod), width = 0.1, size = 4) + 
+    labs(x = "Condition", y = "Number of peptides")
+
+# Proportion of modified peptide features
 # dta_conflu %>% 
 #     group_by(cond, biorep, run_cbt) %>% 
-#     summarise(nb_feature = sum(is_mod)) %>% 
+#     summarise(p_mod = sum(is_mod) / n()) %>% 
 #     ungroup() %>% 
-#     ggplot(aes(cond, nb_feature)) + 
-#     geom_jitter(aes(colour = biorep), width = 0.1, size = 4)
-# 
-# ## number of features for unmodified peptides
+#     ggplot(aes(cond, p_mod)) + 
+#     geom_jitter(aes(colour = biorep), width = 0.1, size = 4) + 
+#     labs(x = "Condition", y = "Proportion of modified features")
+
+# Number of features
 # dta_conflu %>% 
 #     group_by(cond, biorep, run_cbt) %>% 
-#     summarise(nb_feature = sum(!is_mod)) %>% 
+#     summarise(nb_feature = n()) %>% 
 #     ungroup() %>% 
 #     ggplot(aes(cond, nb_feature)) + 
-#     geom_jitter(aes(colour = biorep), width = 0.1, size = 4)
+#     geom_jitter(aes(colour = biorep), width = 0.1, size = 4) + 
+#     labs(x = "Condition", y = "Number of features")
 
 
-## functions for profile plots --------------------------------------
-plot_profile_eqmed <- function(df, protein, runs) {
-    df %>% filter(grepl(pp, Reference)) %>% 
-        select(Reference, feature, run_cbt, log2inty_eqmed) %>% 
-        complete(Reference, run_cbt = levels_run, feature) %>% 
-        ggplot(aes(run_cbt, log2inty_eqmed, group = feature, colour = feature)) + 
+# Functions for plotting profiles -----------------------------------------
+# Plot feature profiles 
+plot_profile <- function(df_allprot, protein, run_level) {
+    df_prot <- df_allprot %>% filter(uniprot_ac == protein)
+    # Complete possible combinations of peptide features and runs
+    mpar <- df_prot %>% distinct(peptide_sequence, feature, is_mod, is_paired)
+    df_fill <- df_prot %>% 
+        select(feature, run_cbt, log2inty) %>% 
+        complete(run_cbt = run_level, feature) %>% 
+        left_join(mpar) %>% 
+        mutate(is_mod_fac = factor(ifelse(is_mod, "Modified", "Unmodified")), 
+               is_par_fac = factor(ifelse(is_paired, "With counterpart", "No counterpart")), 
+               run_fac = factor(run_cbt, levels = run_level))
+    # Feature profiles categorized by modification and matching status
+    df_fill %>% 
+        ggplot(aes(run_fac, log2inty, group = feature, colour = peptide_sequence)) + 
         geom_point(size = 4) +
         geom_line() + 
-        coord_cartesian(ylim = c(10,35)) + 
-        labs(x = "runs", title = protein) + 
-        theme(legend.position = "bottom") + 
-        theme(axis.text.x = element_text(angle = 90, hjust = 1))
-}
-
-plot_profile_raw <- function(df, protein, runs) {
-    df %>% filter(grepl(pp, Reference)) %>% 
-        select(Reference, feature, run_cbt, log2inty) %>% 
-        complete(Reference, run_cbt = levels_run, feature) %>% 
-        ggplot(aes(run_cbt, log2inty, group = feature, colour = feature)) + 
-        geom_point(size = 4) +
-        geom_line() + 
-        coord_cartesian(ylim = c(10,35)) + 
-        labs(x = "runs", title = protein) + 
-        theme(legend.position = "bottom") + 
-        theme(axis.text.x = element_text(angle = 90, hjust = 1))
-}
-
-plot_profiles <- function(df, protein, runs) {
-    df %>% filter(grepl(pp, Reference)) %>% 
-        select(Reference, feature, run_cbt, log2inty, log2inty_eqmed) %>% 
-        complete(Reference, run_cbt = levels_run, feature) %>% 
-        gather("norm", "log2inty", log2inty:log2inty_eqmed) %>% 
-        ggplot(aes(run_cbt, log2inty, group = feature, colour = feature)) + 
-        geom_point(size = 4) +
-        geom_line() + 
-        facet_wrap(~ norm) + 
-        coord_cartesian(ylim = c(10,35)) + 
-        labs(x = "runs", title = protein) + 
-        theme(legend.position = "bottom") + 
-        theme(axis.text.x = element_text(angle = 90, hjust = 1))
-}
-
-plot_profiles_pdf <- function(df, protein, runs) {
-    df %>% filter(grepl(pp, Reference)) %>% 
-        select(Reference, feature, run_cbt, log2inty, log2inty_eqmed) %>% 
-        complete(Reference, run_cbt = levels_run, feature) %>% 
-        gather("norm", "log2inty", log2inty:log2inty_eqmed) %>% 
-        ggplot(aes(run_cbt, log2inty, group = feature, colour = feature)) + 
-        geom_point(size = 2) +
-        geom_line() + 
-        facet_wrap(~ norm) + 
-        coord_cartesian(ylim = c(10,35)) + 
-        labs(x = "runs", title = protein) + 
-        theme(legend.position = "none")
-}
-
-plot_mprofiles <- function(df, protein, runs) {
-    df %>% filter(grepl(pp, Reference)) %>% 
-        select(Reference, feature, run_cbt, log2inty, log2inty_eqmed) %>% 
-        complete(Reference, run_cbt = levels_run, feature) %>% 
-        gather("norm", "log2inty", log2inty:log2inty_eqmed) %>% 
-        mutate(is_mod = ifelse(grepl("\\*", feature), "modified", "unmodified")) %>% 
-        ggplot(aes(run_cbt, log2inty, group = feature, colour = feature)) + 
-        geom_point(size = 4) +
-        geom_line() + 
-        facet_grid(is_mod ~ norm) + 
-        coord_cartesian(ylim = c(10,35)) + 
-        labs(x = "runs", title = protein) + 
-        # theme(legend.position = "bottom") + 
+        facet_grid(is_mod_fac ~ is_par_fac) + 
+        coord_cartesian(ylim = c(10, 35)) + 
+        labs(x = "Run", y = "Log2-intensity", title = protein) + 
         theme(legend.position = "none") + 
         theme(axis.text.x = element_text(angle = 90, hjust = 1))
 }
 
+# Summarization of feature intensities of a protein using Tukey's median polish
+sumprot_tmp <- function(df_prot) {
+    # Required fields of df_prot: feature, run, log2inty
+    inty_wide <- df_prot %>% select(feature, run, log2inty) %>% spread(feature, log2inty)
+    inty_mat <- data.matrix(inty_wide[, -1])
+    mp_out <- medpolish(inty_mat, na.rm = TRUE, trace.iter = FALSE)
+    sum_df <- data_frame(run = inty_wide$run, log2inty = mp_out$overall + mp_out$row)
+    
+    return(sum_df)
+}
 
-## some profile plots -----------------------------------------------
-levels_run <- unique(dta_conflu$run_cbt)
+# Plot feature profiles with summarization
+plot_sumprofile <- function(df_allprot, protein, run_level) {
+    df_prot <- df_allprot %>% filter(uniprot_ac == protein)
+    # Complete possible combinations of features and runs
+    mpar <- df_prot %>% distinct(feature, is_mod, is_paired)
+    # mpar <- df_prot %>% distinct(peptide_sequence, feature, is_mod, is_paired)
+    df_fill <- df_prot %>% 
+        select(feature, run_cbt, log2inty) %>% 
+        complete(run_cbt = run_level, feature) %>% 
+        left_join(mpar) %>% mutate(quan = "Feature")
+    # Median polish summarization
+    key_mod <- c(TRUE, TRUE, FALSE, FALSE)
+    key_par <- c(TRUE, FALSE, TRUE, FALSE)
+    mplist <- vector("list", 4)
+    for (i in seq_along(key_mod)) {
+        df_sub <- df_prot %>% filter(is_mod == key_mod[i], is_paired == key_par[i])
+        if (nrow(df_sub) > 0) {
+            mplist[[i]] <- sumprot_tmp(select(df_sub, feature, run = run_cbt, log2inty)) %>% 
+                complete(run = run_level) %>% 
+                mutate(is_mod = key_mod[i], is_paired = key_par[i])
+        }
+    }
+    # Combine data frames for feature and summarization
+    df_sum <- bind_rows(mplist) %>% rename(run_cbt = run) %>% 
+        # complete(run_cbt = run_level) %>% 
+        mutate(feature = "tmp", quan = "Summarization")
+    df_sumfill <- bind_rows(df_fill, df_sum) %>% 
+        mutate(is_mod_fac = factor(ifelse(is_mod, "Modified", "Unmodified")), 
+               is_par_fac = factor(ifelse(is_paired, "With counterpart", "No counterpart")), 
+               run_fac = factor(run_cbt, levels = run_level), quan = factor(quan))
+    # Profile plot
+    df_sumfill %>% 
+        ggplot(aes(run_fac, log2inty, group = feature, colour = quan, size = quan)) + 
+        geom_point() + geom_line(size = 0.5) + 
+        scale_colour_manual(values = c("lightgray", "darkred")) + 
+        scale_size_manual(values = c(1, 3)) + 
+        facet_grid(is_mod_fac ~ is_par_fac) + 
+        coord_cartesian(ylim = c(10, 35)) + 
+        labs(x = "Run", y = "Log2-intensity", title = protein) + 
+        theme(legend.title = element_blank(), legend.position = "bottom", legend.box = "horizontal") + 
+        theme(axis.text.x = element_text(angle = 90, hjust = 1))
+}
 
-## full sets
-dta_conflu_full <- dta_conflu %>% 
-    group_by(feature) %>% mutate(nb_run = n()) %>% ungroup() %>% 
-    filter(nb_run == 16)
 
-pp <- "UBP30_HUMAN"  # USP30
+# Profile plots -----------------------------------------------------------
+runlvl <- dta_conflu %>% distinct(run_cbt) %>% arrange(run_cbt) %>% .$run_cbt
+runlvl_bat <- dta_conflu %>% distinct(biorep, run_cbt) %>% arrange(biorep, run_cbt) %>% .$run_cbt
+
+# USP30 "UBP30_HUMAN"  
 pp <- "Q70CQ3"
-plot_profiles(dta_conflu, pp, levels_run)
+plot_profile(dta_conflu, pp, runlvl)
+plot_profile(dta_conflu, pp, runlvl_bat)
+plot_sumprofile(dta_conflu, pp, runlvl_bat)
 
-## not detected...
-pp <- "OPA1_HUMAN"  # OPA 1
-plot_profiles(dta_conflu, pp, levels_run)
-
-pp <- "MFN1_HUMAN"  # MFN1
+# MFN1 "MFN1_HUMAN"
 pp <- "Q8IWA4"
-plot_profiles(dta_conflu, pp, levels_run)
+plot_profile(dta_conflu, pp, runlvl)
+plot_profile(dta_conflu, pp, runlvl_bat)
+plot_sumprofile(dta_conflu, pp, runlvl_bat)
 
-pp <- "PRKN2_HUMAN"  # Parkin
-plot_profiles(dta_conflu, pp, levels_run)
-plot_profiles(dta_conflu_full, pp, levels_run)
-plot_mprofiles(dta_conflu, pp, levels_run)
+# Parkin "PRKN2_HUMAN"
+pp <- "O60260"
+plot_profile(dta_conflu, pp, runlvl)
+plot_profile(dta_conflu, pp, runlvl_bat)
+plot_sumprofile(dta_conflu, pp, runlvl_bat)
 
-pp <- "TOM20_HUMAN"  # Tomm20
+# Tomm20 "TOM20_HUMAN"
 pp <- "Q15388"
-plot_profiles(dta_conflu, pp, levels_run)
+plot_profile(dta_conflu, pp, runlvl)
+plot_profile(dta_conflu, pp, runlvl_bat)
+plot_sumprofile(dta_conflu, pp, runlvl_bat)
 
-pp <- "VDAC3_HUMAN"  # VDAC
-plot_profiles(dta_conflu, pp, levels_run)
-plot_profiles(dta_conflu_full, pp, levels_run)
-plot_mprofiles(dta_conflu, pp, levels_run)
+# VDAC "VDAC3_HUMAN"  
+pp <- "Q9Y277"
+plot_profile(dta_conflu, pp, runlvl)
+plot_profile(dta_conflu, pp, runlvl_bat)
+plot_sumprofile(dta_conflu, pp, runlvl_bat)
+plot_sumprofile(dta_conflu_2bc, pp, runlvl_bat)
 
-pp <- "VDAC1_HUMAN"  # VDAC
-plot_profiles(dta_conflu, pp, levels_run)
-plot_mprofiles(dta_conflu, pp, levels_run)
+# VDAC "VDAC1_HUMAN"  
+pp <- "P21796"
+plot_profile(dta_conflu, pp, runlvl)
+plot_profile(dta_conflu, pp, runlvl_bat)
+plot_sumprofile(dta_conflu, pp, runlvl_bat)
+plot_sumprofile(dta_conflu_2bc, pp, runlvl_bat)
 
-pp <- "VDAC2_HUMAN"  # VDAC
-plot_profiles(dta_conflu, pp, levels_run)
-plot_mprofiles(dta_conflu, pp, levels_run)
+# VDAC "VDAC2_HUMAN"  
+pp <- "P45880"
+plot_profile(dta_conflu, pp, runlvl)
+plot_profile(dta_conflu, pp, runlvl_bat)
+plot_sumprofile(dta_conflu, pp, runlvl_bat)
+plot_sumprofile(dta_conflu_2bc, pp, runlvl_bat)
 
-pp <- "G3P_HUMAN"  # GAPDH
-plot_profiles(dta_conflu, pp, levels_run)
-plot_profiles(dta_conflu_full, pp, levels_run)
-plot_mprofiles(dta_conflu, pp, levels_run)
+# GAPDH "G3P_HUMAN"  
+pp <- "P04406"
+plot_profile(dta_conflu, pp, runlvl)
+plot_profile(dta_conflu, pp, runlvl_bat)
+plot_sumprofile(dta_conflu, pp, runlvl_bat)
+plot_sumprofile(dta_conflu_2bc, pp, runlvl_bat)
 
-pp <- "ACTB_HUMAN"  # Actin
-plot_profiles(dta_conflu, pp, levels_run)
-plot_mprofiles(dta_conflu, pp, levels_run)
+# Actin "ACTB_HUMAN"  
+pp <- "P60709"
+plot_profile(dta_conflu, pp, runlvl)
+plot_profile(dta_conflu, pp, runlvl_bat)
+plot_sumprofile(dta_conflu, pp, runlvl_bat)
+plot_sumprofile(dta_conflu_2bc, pp, runlvl_bat)
 
-pp <- "RL40_HUMAN"  # ubiquitin
-plot_profiles(dta_conflu, pp, levels_run)
-plot_mprofiles(dta_conflu, pp, levels_run)
+# Ubiquitin "RL40_HUMAN" 
+pp <- "P62987"
+plot_profile(dta_conflu, pp, runlvl)
+plot_profile(dta_conflu, pp, runlvl_bat)
+plot_sumprofile(dta_conflu, pp, runlvl_bat)
+plot_sumprofile(dta_conflu_2bc, pp, runlvl_bat)
 
 
-# plot_profile_eqmed(dta_conflu, pp, levels_run)
-# plot_profiles(dta_conflu, pp, levels_run)
+## (old) functions for profile plots --------------------------------------
+# plot_profiles_pdf <- function(df, protein, runs) {
+#     df %>% filter(grepl(pp, Reference)) %>% 
+#         select(Reference, feature, run_cbt, log2inty, log2inty_eqmed) %>% 
+#         complete(Reference, run_cbt = levels_run, feature) %>% 
+#         gather("norm", "log2inty", log2inty:log2inty_eqmed) %>% 
+#         ggplot(aes(run_cbt, log2inty, group = feature, colour = feature)) + 
+#         geom_point(size = 2) +
+#         geom_line() + 
+#         facet_wrap(~ norm) + 
+#         coord_cartesian(ylim = c(10,35)) + 
+#         labs(x = "runs", title = protein) + 
+#         theme(legend.position = "none")
+# }
 
 
 ## site/residue centered representation -----------------------------
