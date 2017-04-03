@@ -502,64 +502,38 @@ sumprot_tmp <- function(df_prot) {
     return(sum_df)
 }
 
-sum_feature <- function(df_allprot, proteins) {
-    # Housekeeping
-    proteins <- unique(proteins)
-    df_allprot <- df_allprot %>% filter(uniprot_ac %in% proteins)
-    # Output in a list
-    sumprot <- vector("list", length(proteins))
-    key_mod <- c(TRUE, TRUE, FALSE, FALSE)
-    key_par <- c(TRUE, FALSE, TRUE, FALSE)
-    for (p in seq_along(proteins)) {
-        df_prot <- df_allprot %>% filter(uniprot_ac == proteins[p])
-        mplist <- vector("list", 4)
-        for (i in seq_along(key_mod)) {
-            df_sub <- df_prot %>% filter(is_mod == key_mod[i], is_paired == key_par[i])
-            if (nrow(df_sub) > 0) {
-                mplist[[i]] <- sumprot_tmp(select(df_sub, feature, run, log2inty)) %>% 
-                    mutate(is_mod = key_mod[i], is_paired = key_par[i])
-            }
-        }
-        sumprot[[p]] <- bind_rows(mplist) %>% mutate(uniprot_ac = proteins[p])
-    }
-    
-    return(bind_rows(sumprot) %>% rename(log2inty_tmp = log2inty))
-}
 
-# Batch-wise
+# Run-level summarization (within batch)
 sum_feature_bch <- function(df_allprot, proteins) {
     # Housekeeping
     proteins <- unique(proteins)
     df_allprot <- df_allprot %>% filter(uniprot_ac %in% proteins)
-    # Output in a list
-    sumprot <- vector("list", length(proteins))
-    key_mod <- c(TRUE, TRUE, FALSE, FALSE)
-    key_par <- c(TRUE, FALSE, TRUE, FALSE)
-    for (p in seq_along(proteins)) {
-        df_prot <- df_allprot %>% filter(uniprot_ac == proteins[p])
-        mplist <- vector("list", 4)
-        for (i in seq_along(key_mod)) {
-            df_sub <- df_prot %>% filter(is_mod == key_mod[i], is_paired == key_par[i])
-            if (nrow(df_sub) > 0) {
-                df_sub1 <- df_sub %>% filter(biorep == "B1")
-                df_sub2 <- df_sub %>% filter(biorep == "B2")
-                if (nrow(df_sub1) > 0) {
-                    if (nrow(df_sub2) > 0) {
-                        df_subtmp <- bind_rows(sumprot_tmp(df_sub1), sumprot_tmp(df_sub2))
-                    } else {
-                        df_subtmp <- sumprot_tmp(df_sub1)
-                    }
-                } else {
-                    df_subtmp <- sumprot_tmp(df_sub2)
-                }
-                mplist[[i]] <- df_subtmp %>% 
-                    mutate(is_mod = key_mod[i], is_paired = key_par[i])
-            }
-        }
-        sumprot[[p]] <- bind_rows(mplist) %>% mutate(uniprot_ac = proteins[p])
-    }
+    # Nested data frame (protein, mod, paired, batch)
+    nest_allprot <- df_allprot %>% 
+        group_by(uniprot_ac, is_mod, is_paired, biorep) %>% 
+        nest()
+    # TMP summarization with function sumprot_tmp
+    nest_allprot <- nest_allprot %>% 
+        mutate(sumtmp = map(data, sumprot_tmp))
     
-    return(bind_rows(sumprot) %>% rename(log2inty_tmp = log2inty))
+    return(unnest(nest_allprot, sumtmp) %>% rename(log2inty_tmp = log2inty))
+}
+
+
+# Run-level summarization (across batches)
+sum_feature <- function(df_allprot, proteins) {
+    # Housekeeping
+    proteins <- unique(proteins)
+    df_allprot <- df_allprot %>% filter(uniprot_ac %in% proteins)
+    # Nested data frame (protein, mod, paired)
+    nest_allprot <- df_allprot %>% 
+        group_by(uniprot_ac, is_mod, is_paired) %>% 
+        nest()
+    # TMP summarization with function sumprot_tmp
+    nest_allprot <- nest_allprot %>% 
+        mutate(sumtmp = map(data, sumprot_tmp))
+    
+    return(unnest(nest_allprot, sumtmp) %>% rename(log2inty_tmp = log2inty))
 }
 
 
