@@ -620,19 +620,13 @@ nested_perbch <- df_protsumbch_sub %>%
     nest()
 
 nested_perbch <- nested_perbch %>% 
-    mutate(cnt = map(data, . %>% group_by(group) %>% count())) %>% 
     mutate(fit = map(data, ~ lm(log2inty_tmp ~ 0 + group, data = .))) %>% 
-    mutate(param = map(fit, tidy))
+    mutate(param = map(fit, tidy), df_res = map_dbl(fit, df.residual))
 
 param_perbch <- nested_perbch %>% 
     unnest(param) %>% 
     mutate(group = gsub("group", "", term)) %>% 
     select(-term, -statistic, -p.value)
-
-cnt_perbch <- nested_perbch %>% 
-    unnest(cnt)
-
-param_perbch <- left_join(param_perbch, cnt_perbch)
 
 
 # All bathces in one model
@@ -641,23 +635,14 @@ nested_allbch <- df_protsumbch_sub %>%
     nest()
 
 nested_allbch <- nested_allbch %>% 
-    mutate(cnt = map(data, . %>% group_by(group, batch) %>% count())) %>% 
     mutate(fit = map(data, ~ lm(log2inty_tmp ~ 0 + group + batch, data = .))) %>% 
-    mutate(param = map(fit, tidy))
+    mutate(param = map(fit, tidy), df_res = map_dbl(fit, df.residual))
 
 param_allbch <- nested_allbch %>% 
     unnest(param) %>% 
     mutate(group = gsub("group", "", term)) %>% 
     filter(!grepl("batch", term)) %>% 
     select(-term, -statistic, -p.value)
-
-cnt_allbch <- nested_allbch %>%
-    unnest(cnt) %>% 
-    group_by(uniprot_ac, is_mod, group) %>% 
-    summarise(n = sum(n), n_bch = n_distinct(batch)) %>% 
-    ungroup()
-
-param_allbch <- left_join(param_allbch, cnt_allbch)
 
 
 # Group comparison --------------------------------------------------------
@@ -675,43 +660,46 @@ for (i in seq_along(cases)) {
     diff_perbch <- param_perbch %>% 
         filter(group %in% c(grp_ctrl, grp_case)) %>% 
         mutate(key_grp = ifelse(group == grp_ctrl, "G0", "G1")) %>% 
-        complete(uniprot_ac, is_mod, batch, key_grp) %>% 
-        group_by(uniprot_ac, is_mod, batch) %>% 
-        summarise(log2fc = diff(estimate), se2 = sum(std.error ^ 2), 
-                  df_den = sum(std.error ^ 4 / (n - 1))) %>% 
+        complete(uniprot_ac, is_mod, batch, key_grp, df_res) %>% 
+        group_by(uniprot_ac, is_mod, batch, df_res) %>% 
+        summarise(log2fc = diff(estimate), se2 = sum(std.error ^ 2)) %>% 
+        group_by(uniprot_ac, is_mod) %>% 
+        mutate(wt_bch = 1 / n()) %>% 
         ungroup()
     # All-batch model
     diff_allbch <- param_allbch %>% 
         filter(group %in% c(grp_ctrl, grp_case)) %>% 
         mutate(key_grp = ifelse(group == grp_ctrl, "G0", "G1")) %>% 
-        complete(uniprot_ac, is_mod, key_grp) %>% 
-        group_by(uniprot_ac, is_mod) %>% 
-        summarise(log2fc = diff(estimate), se2 = sum(std.error ^ 2), 
-                  # df_2grp = sum(n) - sum(n_bch), 
-                  df_den = sum(std.error ^ 4 / (n - n_bch))) %>% 
+        complete(uniprot_ac, is_mod, key_grp, df_res) %>% 
+        group_by(uniprot_ac, is_mod, df_res) %>% 
+        summarise(log2fc = diff(estimate), se2 = sum(std.error ^ 2)) %>% 
         ungroup()
     # H^1
     test_null1[[i]] <- diff_perbch %>% filter(is_mod) %>% 
         group_by(uniprot_ac) %>% 
-        summarise(logFC = mean(log2fc), SE = sqrt(mean(se2)), DF = sum(se2) ^ 2 / sum(df_den), 
+        mutate(wt_bch = 1 / n(), wse2 = wt_bch ^ 2 * se2) %>% 
+        summarise(logFC = mean(log2fc), SE = sqrt(sum(wse2)), 
+                  DF = sum(wse2) ^ 2 / sum(wse2 ^ 2 / df_res), 
                   t_stat = logFC / SE, p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)) %>% 
         mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs "), hyp = "null1")
     # H^2
-    test_null2[[i]] <- diff_perbch %>% group_by(uniprot_ac, batch) %>% 
-        summarise(log2fc = diff(log2fc), se2 = sum(se2), df_den = sum(df_den)) %>% 
-        summarise(logFC = mean(log2fc), SE = sqrt(mean(se2)), DF = sum(se2) ^ 2 / sum(df_den), 
+    test_null2[[i]] <- diff_perbch %>% group_by(uniprot_ac, is_mod) %>% 
+        mutate(wt_bch = 1 / n(), wse2 = wt_bch ^ 2 * se2, wlog2fc = wt_bch * log2fc) %>% 
+        group_by(uniprot_ac) %>% 
+        summarise(logFC = sum(wlog2fc[is_mod]) - sum(wlog2fc[!is_mod]), 
+                  SE = sqrt(sum(wse2)), DF = sum(wse2) ^ 2 / sum(wse2 ^ 2 / df_res), 
                   t_stat = logFC / SE, p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)) %>% 
         mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs "), hyp = "null2")
-    # H^3
+    # H^3 (grouped summary representation is kept for readability)
     test_null3[[i]] <- diff_allbch %>% filter(is_mod) %>% 
         group_by(uniprot_ac) %>% 
-        summarise(logFC = log2fc, SE = sqrt(se2), DF = se2 ^ 2 / df_den, 
+        summarise(logFC = log2fc, SE = sqrt(se2), DF = df_res, 
                   t_stat = logFC / SE, p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)) %>% 
         mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs "), hyp = "null3")
     # H^4
     test_null4[[i]] <- diff_allbch %>% 
         group_by(uniprot_ac) %>% 
-        summarise(logFC = diff(log2fc), SE = sqrt(sum(se2)), DF = sum(se2) ^ 2 / sum(df_den), 
+        summarise(logFC = diff(log2fc), SE = sqrt(sum(se2)), DF = sum(se2) ^ 2 / sum(se2 ^ 2 / df_res), 
                   t_stat = logFC / SE, p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)) %>% 
         mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs "), hyp = "null4")
 }
