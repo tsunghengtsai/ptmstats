@@ -285,6 +285,7 @@ dta_conflu %>%
 
 
 # Functions for plotting profiles -----------------------------------------
+# [TODO]: should use one single function with options for pairing & summarization
 # Plot feature profiles 
 plot_profile <- function(df_allprot, protein, run_level) {
     df_prot <- df_allprot %>% filter(uniprot_ac == protein)
@@ -540,23 +541,25 @@ sum_feature <- function(df_allprot, proteins) {
 # Summarization for all proteins ------------------------------------------
 prot2sum <- unique(dta_conflu$uniprot_ac)
 
-df_protsum <- sum_feature(dta_conflu, prot2sum)  # across batches
-df_protsumbch <- sum_feature_bch(dta_conflu, prot2sum)  # per batch
+df_sum <- sum_feature(dta_conflu, prot2sum)  # across batches
+df_sumbch <- sum_feature_bch(dta_conflu, prot2sum)  # per batch
 
-df_protsum2 <- df_protsum %>% 
-    left_join(rename(df_protsumbch, log2inty_tmpbch = log2inty_tmp)) %>% 
+
+# Comparison between two summarization results ----------------------------
+df_sum2 <- df_sum %>% 
+    left_join(rename(df_sumbch, log2inty_tmpbch = log2inty_tmp)) %>% 
     mutate(is_mod_fac = factor(ifelse(is_mod, "Modified", "Unmodified")), 
            is_par_fac = factor(ifelse(is_paired, "With counterpart", "No counterpart")), 
            batch = ifelse(grepl("B1", run), "B1", "B2"))
 
-df_protsum2 %>% 
+df_sum2 %>% 
     ggplot(aes(log2inty_tmp, log2inty_tmpbch, colour = batch)) + 
     geom_point(alpha = 0.4) + 
     geom_abline(intercept = 0, slope = 1) + 
     labs(x = "Summarization (across batches)", y = "Summarization (per batch)") + 
     facet_grid(is_mod_fac ~ is_par_fac)
 
-df_protsum2 %>% 
+df_sum2 %>% 
     mutate(log2inty_diff = log2inty_tmpbch - log2inty_tmp) %>% 
     ggplot(aes(batch, log2inty_diff)) + 
     geom_boxplot() + 
@@ -607,7 +610,7 @@ prot_full <- df_protsum2 %>% filter(!is_paired) %>%
     count(uniprot_ac) %>% filter(n == 32) %>% .$uniprot_ac
 
 # Subset unpaired peptides of fully-observed proteins 
-df_protsumbch_sub <- df_protsumbch %>% 
+df_full <- df_sumbch %>% 
     filter(!is_paired) %>% 
     filter(uniprot_ac %in% prot_full) %>% 
     separate(run, into = c("group", "biotech"), sep = "-", remove = F) %>% 
@@ -615,7 +618,7 @@ df_protsumbch_sub <- df_protsumbch %>%
 
 
 # A batch per model
-nested_perbch <- df_protsumbch_sub %>% 
+nested_perbch <- df_full %>% 
     group_by(uniprot_ac, is_mod, batch) %>%
     nest()
 
@@ -630,7 +633,7 @@ param_perbch <- nested_perbch %>%
 
 
 # All bathces in one model
-nested_allbch <- df_protsumbch_sub %>% 
+nested_allbch <- df_full %>% 
     group_by(uniprot_ac, is_mod) %>%
     nest()
 
@@ -720,6 +723,11 @@ test_all %>% ggplot(aes(hyp, t_stat)) +
 
 test_all %>% ggplot(aes(t_stat, colour = hyp)) + 
     geom_density() + 
+    facet_wrap(~ ctrx)
+
+# Degrees of freedom
+test_all %>% ggplot(aes(hyp, DF)) + 
+    geom_boxplot() + geom_jitter() + 
     facet_wrap(~ ctrx)
 
 # Adjusted p-value
