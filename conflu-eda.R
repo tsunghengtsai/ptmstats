@@ -44,10 +44,10 @@ dta_conflu <- dta_conflu %>%
            -peptide_validity)
 
 # OBJ# can be viewed as a batch identity
-uniq_subj <- unique(df_design$id_subject)
-key_subj <- paste0("S", sprintf("%02d", 1:length(uniq_subj)))
+subj_uniq <- unique(df_design$id_subject)
+subj_key <- str_c("S", str_pad(seq_along(subj_uniq), width = 2, pad = "0"))
 df_design <- df_design %>% 
-    mutate(subj = plyr::mapvalues(id_subject, from = uniq_subj, to = key_subj), 
+    mutate(subj = plyr::mapvalues(id_subject, from = subj_uniq, to = subj_key), 
            biorep = ifelse(ann_objective_id == 37122, "B1", "B2"), 
            techrep = paste0("T", id_injectionset), 
            run_bt = paste0(biorep, techrep), 
@@ -69,9 +69,9 @@ dta_conflu <- dta_conflu %>%
 df_pep <- dta_conflu %>% 
     distinct(peptide_sequence, is_mod) %>% 
     mutate(unmod_peptide = str_replace_all(peptide_sequence, "\\*", ""), 
-           trim_peptide = str_match(unmod_peptide, regex("\\.[ACDEFGHIKLMNPQRSTVWY]+")) %>% 
-               str_replace("\\.", ""), 
-           nb_aa = str_length(trim_peptide))
+           trimmed_pep = str_extract(unmod_peptide, "(?<=\\.)([ACDEFGHIKLMNPQRSTVWY\\*]+)"), 
+           trimmed_mod = str_extract(peptide_sequence, "(?<=\\.)([ACDEFGHIKLMNPQRSTVWY\\*]+)"), 
+           nb_aa = str_length(trimmed_pep))
 
 # Make sure each peptide was extracted correctly
 # df_pep %>% filter(is.na(nb_aa) | nb_aa == 0)
@@ -102,10 +102,8 @@ dta_conflu <- dta_conflu %>%
     filter(!is.na(ms2_charge), !is.na(ms2_rt), grepl(regex_uniprot, Reference))
 
 # Extract uniprot accession number
-uniq_ref <- dta_conflu %>% distinct(Reference) %>% .$Reference
-uniq_unip <- unlist(lapply(uniq_ref, function(x) str_extract(unlist(str_split(x, '\\|'))[2], regex_uniprot)))
 dta_conflu <- dta_conflu %>% 
-    mutate(uniprot_ac = plyr::mapvalues(Reference, from = uniq_ref, to = uniq_unip))
+    separate(Reference, into = c("p_entry", "uniprot_iso"), sep = "\\|", remove = FALSE)
 
 
 # Data exploration --------------------------------------------------------
@@ -133,7 +131,7 @@ dta_conflu %>% select(Reference, peptide_sequence) %>% distinct() %>%
     filter(nb_prot > 1) %>% arrange(peptide_sequence)
 
 # Uniprot ID ([TODO]: address the aliasing pairs, search, e.g., P08107)
-dta_conflu %>% select(uniprot_ac, peptide_sequence) %>% distinct() %>% 
+dta_conflu %>% select(uniprot_iso, peptide_sequence) %>% distinct() %>% 
     group_by(peptide_sequence) %>% mutate(nb_prot = n()) %>% ungroup() %>% 
     filter(nb_prot > 1) %>% arrange(peptide_sequence)
 
@@ -149,17 +147,17 @@ df_pep %>% filter(is_paired) %>% distinct(unmod_peptide)
 # Use the max for duplicate features (per run)
 # [TODO]: conisder is_xq, ms2_rt
 dta_conflu <- dta_conflu %>% 
-    group_by(Reference, uniprot_ac, peptide_sequence, is_mod, feature, cond, biorep, run) %>% 
+    group_by(Reference, uniprot_iso, peptide_sequence, is_mod, feature, cond, biorep, run) %>% 
     summarise(log2inty = max(log2inty)) %>% 
     ungroup()
 
-# Remove peptides with ambiguous matches (to >1 uniprot_ac) for now
+# Remove peptides with ambiguous matches (to >1 uniprot_iso) for now
 # pep2uniprot <- dta_conflu %>% 
-#     distinct(peptide_sequence, uniprot_ac) %>% 
+#     distinct(peptide_sequence, uniprot_iso) %>% 
 #     count(peptide_sequence)
 
 # Remove peptides with ambiguous matches (to >1 Reference): more stringent than 
-# mapping with uniprot_ac, as multiple Reference may map to the same uniprot_ac
+# mapping with uniprot_iso, as multiple Reference may map to the same uniprot_iso
 # Example: dta_conflu %>% filter(feature == "K.AFSLK*TSTSAVR.H_3", run == "CCCP_Light-B1T1")
 pep2uniprot <- dta_conflu %>% 
     distinct(peptide_sequence, Reference) %>% 
@@ -172,7 +170,7 @@ dta_conflu <- dta_conflu %>%
 # [TODO]: check the definition of is_ref
 dta_conflu <- dta_conflu %>% 
     left_join(select(df_pep, peptide_sequence, unmod_peptide, is_paired)) %>% 
-    group_by(uniprot_ac) %>% 
+    group_by(uniprot_iso) %>% 
     mutate(is_ref = any(!is_paired & !is_mod)) %>% ungroup()
 
 # More than 70% of the modified peptides might be eligible for protein normalization
@@ -197,11 +195,11 @@ dta_conflu <- dta_conflu %>%
 # dta_conflu_2bc <- dta_conflu %>% semi_join(ftr_2bc)
 
 # Original dataset: 2954 proteins, 21419 features
-# dta_conflu %>% distinct(uniprot_ac) %>% nrow()
+# dta_conflu %>% distinct(uniprot_iso) %>% nrow()
 # dta_conflu %>% distinct(feature) %>% nrow()
 
 # Filtered dataset: 1292 proteins, 4440 features
-# dta_conflu_2bc %>% distinct(uniprot_ac) %>% nrow()
+# dta_conflu_2bc %>% distinct(uniprot_iso) %>% nrow()
 # dta_conflu_2bc %>% distinct(feature) %>% nrow()
 
 
@@ -288,7 +286,7 @@ dta_conflu %>%
 # [TODO]: should use one single function with options for pairing & summarization
 # Plot feature profiles 
 plot_profile <- function(df_allprot, protein, run_level) {
-    df_prot <- df_allprot %>% filter(uniprot_ac == protein)
+    df_prot <- df_allprot %>% filter(uniprot_iso == protein)
     # Complete possible combinations of peptide features and runs
     mpar <- df_prot %>% distinct(unmod_peptide, feature, is_mod, is_paired)
     df_fill <- df_prot %>% 
@@ -312,7 +310,7 @@ plot_profile <- function(df_allprot, protein, run_level) {
 
 # Plot feature profiles with no counterpart
 plot_nc_profile <- function(df_allprot, protein, run_level) {
-    df_prot <- df_allprot %>% filter(uniprot_ac == protein) %>% 
+    df_prot <- df_allprot %>% filter(uniprot_iso == protein) %>% 
         filter(!is_paired)
     # Complete possible combinations of peptide features and runs
     mpar <- df_prot %>% 
@@ -341,7 +339,7 @@ plot_nc_profile <- function(df_allprot, protein, run_level) {
 
 # Plot feature profiles with summarization
 plot_sumprofile <- function(df_allprot, protein, run_level) {
-    df_prot <- df_allprot %>% filter(uniprot_ac == protein)
+    df_prot <- df_allprot %>% filter(uniprot_iso == protein)
     # Complete possible combinations of features and runs
     mpar <- df_prot %>% distinct(feature, is_mod, is_paired)
     df_fill <- df_prot %>% 
@@ -381,7 +379,7 @@ plot_sumprofile <- function(df_allprot, protein, run_level) {
 
 # Plot feature profiles (no counterpart) with summarization per batch
 plot_nc_sumprofile <- function(df_allprot, protein, run_level) {
-    df_prot <- df_allprot %>% filter(uniprot_ac == protein) %>% 
+    df_prot <- df_allprot %>% filter(uniprot_iso == protein) %>% 
         filter(!is_paired)
     # Complete possible combinations of features and runs
     mpar <- df_prot %>% distinct(feature, is_mod)
@@ -435,7 +433,7 @@ plot_nc_sumprofile <- function(df_allprot, protein, run_level) {
 
 # Plot feature profiles (no counterpart) with 2 ways of summarization
 plot_nc_sumprofile2 <- function(df_allprot, protein, run_level) {
-    df_prot <- df_allprot %>% filter(uniprot_ac == protein) %>% 
+    df_prot <- df_allprot %>% filter(uniprot_iso == protein) %>% 
         filter(!is_paired)
     # Complete possible combinations of features and runs
     mpar <- df_prot %>% distinct(feature, is_mod)
@@ -508,10 +506,10 @@ sumprot_tmp <- function(df_prot) {
 sum_feature_bch <- function(df_allprot, proteins) {
     # Housekeeping
     proteins <- unique(proteins)
-    df_allprot <- df_allprot %>% filter(uniprot_ac %in% proteins)
+    df_allprot <- df_allprot %>% filter(uniprot_iso %in% proteins)
     # Nested data frame (protein, mod, paired, batch)
     nest_allprot <- df_allprot %>% 
-        group_by(uniprot_ac, is_mod, is_paired, biorep) %>% 
+        group_by(uniprot_iso, is_mod, is_paired, biorep) %>% 
         nest()
     # TMP summarization with function sumprot_tmp
     nest_allprot <- nest_allprot %>% 
@@ -525,10 +523,10 @@ sum_feature_bch <- function(df_allprot, proteins) {
 sum_feature <- function(df_allprot, proteins) {
     # Housekeeping
     proteins <- unique(proteins)
-    df_allprot <- df_allprot %>% filter(uniprot_ac %in% proteins)
+    df_allprot <- df_allprot %>% filter(uniprot_iso %in% proteins)
     # Nested data frame (protein, mod, paired)
     nest_allprot <- df_allprot %>% 
-        group_by(uniprot_ac, is_mod, is_paired) %>% 
+        group_by(uniprot_iso, is_mod, is_paired) %>% 
         nest()
     # TMP summarization with function sumprot_tmp
     nest_allprot <- nest_allprot %>% 
@@ -539,7 +537,7 @@ sum_feature <- function(df_allprot, proteins) {
 
 
 # Summarization for all proteins ------------------------------------------
-prot2sum <- unique(dta_conflu$uniprot_ac)
+prot2sum <- unique(dta_conflu$uniprot_iso)
 
 df_sum <- sum_feature(dta_conflu, prot2sum)  # across batches
 df_sumbch <- sum_feature_bch(dta_conflu, prot2sum)  # per batch
@@ -569,36 +567,36 @@ df_sum2 %>%
 
 # Full set for inference --------------------------------------------------
 # Number of proteins
-df_protsum2 %>% distinct(uniprot_ac)
+df_sum2 %>% distinct(uniprot_iso)
 
 # Number of proteins with fully observed unpaired modifications
-df_protsum2 %>% filter(!is_paired, is_mod) %>% count(uniprot_ac) %>% filter(n == 16)
+df_sum2 %>% filter(!is_paired, is_mod) %>% count(uniprot_iso) %>% filter(n == 16)
 
 # Number of proteins with fully observed unpaired modifications and unmodified peptides
-df_protsum2 %>% filter(!is_paired) %>% count(uniprot_ac) %>% filter(n == 32)
+df_sum2 %>% filter(!is_paired) %>% count(uniprot_iso) %>% filter(n == 32)
 
 
 # Eligibility for protein abundance adjustment ----------------------------
 # dta_conflu <- dta_conflu %>% left_join(df_protsum)
-# dta_conflu %>% group_by(uniprot_ac) %>% summarise(is_allref = all(is_ref)) %>% count(is_allref)
+# dta_conflu %>% group_by(uniprot_iso) %>% summarise(is_allref = all(is_ref)) %>% count(is_allref)
 
 # df_protsum %>% 
 #     mutate(is_ref = !(is_mod | is_paired)) %>% 
-#     group_by(uniprot_ac, run) %>% 
+#     group_by(uniprot_iso, run) %>% 
 #     summarise(run_ref = any(is_ref)) %>% 
 #     summarise(prot_ref = all(run_ref)) %>% 
 #     count(prot_ref)
 # 
 # df_protsum %>% filter(grepl("B1", run)) %>% 
 #     mutate(is_ref = !(is_mod | is_paired)) %>% 
-#     group_by(uniprot_ac, run) %>% 
+#     group_by(uniprot_iso, run) %>% 
 #     summarise(run_ref = any(is_ref)) %>% 
 #     summarise(prot_ref = all(run_ref)) %>% 
 #     count(prot_ref)
 # 
 # df_protsum %>% filter(grepl("B2", run)) %>% 
 #     mutate(is_ref = !(is_mod | is_paired)) %>% 
-#     group_by(uniprot_ac, run) %>% 
+#     group_by(uniprot_iso, run) %>% 
 #     summarise(run_ref = any(is_ref)) %>% 
 #     summarise(prot_ref = all(run_ref)) %>% 
 #     count(prot_ref)
@@ -606,20 +604,20 @@ df_protsum2 %>% filter(!is_paired) %>% count(uniprot_ac) %>% filter(n == 32)
 
 # Modeling with nested data frame -----------------------------------------
 # Proteins with fully observed unpaired modifications and unmodified peptides
-prot_full <- df_protsum2 %>% filter(!is_paired) %>% 
-    count(uniprot_ac) %>% filter(n == 32) %>% .$uniprot_ac
+prot_full <- df_sumbch %>% filter(!is_paired) %>% 
+    count(uniprot_iso) %>% filter(n == 32) %>% .$uniprot_iso
 
 # Subset unpaired peptides of fully-observed proteins 
 df_full <- df_sumbch %>% 
     filter(!is_paired) %>% 
-    filter(uniprot_ac %in% prot_full) %>% 
+    filter(uniprot_iso %in% prot_full) %>% 
     separate(run, into = c("group", "biotech"), sep = "-", remove = F) %>% 
     mutate(batch = ifelse(grepl("B1", biotech), "B1", "B2"))
 
 
 # A batch per model
 nested_perbch <- df_full %>% 
-    group_by(uniprot_ac, is_mod, batch) %>%
+    group_by(uniprot_iso, is_mod, batch) %>%
     nest()
 
 nested_perbch <- nested_perbch %>% 
@@ -634,7 +632,7 @@ param_perbch <- nested_perbch %>%
 
 # All bathces in one model
 nested_allbch <- df_full %>% 
-    group_by(uniprot_ac, is_mod) %>%
+    group_by(uniprot_iso, is_mod) %>%
     nest()
 
 nested_allbch <- nested_allbch %>% 
@@ -663,45 +661,45 @@ for (i in seq_along(cases)) {
     diff_perbch <- param_perbch %>% 
         filter(group %in% c(grp_ctrl, grp_case)) %>% 
         mutate(key_grp = ifelse(group == grp_ctrl, "G0", "G1")) %>% 
-        complete(uniprot_ac, is_mod, batch, key_grp, df_res) %>% 
-        group_by(uniprot_ac, is_mod, batch, df_res) %>% 
+        complete(uniprot_iso, is_mod, batch, key_grp, df_res) %>% 
+        group_by(uniprot_iso, is_mod, batch, df_res) %>% 
         summarise(log2fc = diff(estimate), se2 = sum(std.error ^ 2)) %>% 
-        group_by(uniprot_ac, is_mod) %>% 
-        mutate(wt_bch = 1 / n()) %>% 
+        group_by(uniprot_iso, is_mod) %>% 
+        # mutate(wt_bch = 1 / n()) %>% 
         ungroup()
     # All-batch model
     diff_allbch <- param_allbch %>% 
         filter(group %in% c(grp_ctrl, grp_case)) %>% 
         mutate(key_grp = ifelse(group == grp_ctrl, "G0", "G1")) %>% 
-        complete(uniprot_ac, is_mod, key_grp, df_res) %>% 
-        group_by(uniprot_ac, is_mod, df_res) %>% 
+        complete(uniprot_iso, is_mod, key_grp, df_res) %>% 
+        group_by(uniprot_iso, is_mod, df_res) %>% 
         summarise(log2fc = diff(estimate), se2 = sum(std.error ^ 2)) %>% 
         ungroup()
     # H^1
     test_null1[[i]] <- diff_perbch %>% filter(is_mod) %>% 
-        group_by(uniprot_ac) %>% 
+        group_by(uniprot_iso) %>% 
         mutate(wt_bch = 1 / n(), wse2 = wt_bch ^ 2 * se2) %>% 
         summarise(logFC = mean(log2fc), SE = sqrt(sum(wse2)), 
                   DF = sum(wse2) ^ 2 / sum(wse2 ^ 2 / df_res), 
                   t_stat = logFC / SE, p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)) %>% 
         mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs "), hyp = "null1")
     # H^2
-    test_null2[[i]] <- diff_perbch %>% group_by(uniprot_ac, is_mod) %>% 
+    test_null2[[i]] <- diff_perbch %>% group_by(uniprot_iso, is_mod) %>% 
         mutate(wt_bch = 1 / n(), wse2 = wt_bch ^ 2 * se2, wlog2fc = wt_bch * log2fc) %>% 
-        group_by(uniprot_ac) %>% 
+        group_by(uniprot_iso) %>% 
         summarise(logFC = sum(wlog2fc[is_mod]) - sum(wlog2fc[!is_mod]), 
                   SE = sqrt(sum(wse2)), DF = sum(wse2) ^ 2 / sum(wse2 ^ 2 / df_res), 
                   t_stat = logFC / SE, p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)) %>% 
         mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs "), hyp = "null2")
     # H^3 (grouped summary representation is kept for readability)
     test_null3[[i]] <- diff_allbch %>% filter(is_mod) %>% 
-        group_by(uniprot_ac) %>% 
+        group_by(uniprot_iso) %>% 
         summarise(logFC = log2fc, SE = sqrt(se2), DF = df_res, 
                   t_stat = logFC / SE, p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)) %>% 
         mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs "), hyp = "null3")
     # H^4
     test_null4[[i]] <- diff_allbch %>% 
-        group_by(uniprot_ac) %>% 
+        group_by(uniprot_iso) %>% 
         summarise(logFC = diff(log2fc), SE = sqrt(sum(se2)), DF = sum(se2) ^ 2 / sum(se2 ^ 2 / df_res), 
                   t_stat = logFC / SE, p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)) %>% 
         mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs "), hyp = "null4")
@@ -712,7 +710,7 @@ test_all <- bind_rows(test_null1, test_null2, test_null3, test_null4) %>%
     mutate(p_adj = p.adjust(p_val, method = "BH")) %>% 
     ungroup()
 
-test_all %>% filter(p_adj < 0.05)
+
 
 
 # Comparison of the testing results ---------------------------------------
@@ -740,6 +738,119 @@ test_all %>% ggplot(aes(hyp, -log10(p_adj))) +
     geom_boxplot() + geom_point() + 
     geom_hline(yintercept = -log10(0.05), linetype = 2) + 
     facet_wrap(~ ctrx)
+
+
+
+# Significant differences -------------------------------------------------
+test_all %>% filter(p_adj < 0.05)
+
+test_sig <- test_all %>% filter(p_adj < 0.05)
+
+test_sig %>% group_by(ctrx, hyp) %>% count()
+
+
+# Compare H_1 vs H_2 in CCCP_Satur vs CCCP_Light
+test_sig %>% 
+    filter(hyp %in% c("null1", "null2"), ctrx == "CCCP_Satur vs CCCP_Light") %>% 
+    group_by(uniprot_iso) %>% 
+    count()
+
+prot_h1h2 <- test_sig %>% 
+    filter(hyp %in% c("null1", "null2"), ctrx == "CCCP_Satur vs CCCP_Light") %>% 
+    group_by(uniprot_iso) %>% 
+    count() %>% 
+    filter(n == 2) %>% 
+    .$uniprot_iso
+
+prot_h1_nh2 <- test_sig %>% 
+    filter(hyp %in% c("null1", "null2"), ctrx == "CCCP_Satur vs CCCP_Light") %>% 
+    group_by(uniprot_iso) %>% 
+    filter(n() == 1) %>% 
+    ungroup() %>% 
+    filter(hyp == "null1") %>% 
+    .$uniprot_iso
+
+prot_h2_nh1 <- test_sig %>% 
+    filter(hyp %in% c("null1", "null2"), ctrx == "CCCP_Satur vs CCCP_Light") %>% 
+    group_by(uniprot_iso) %>% 
+    filter(n() == 1) %>% 
+    ungroup() %>% 
+    filter(hyp == "null2") %>% 
+    .$uniprot_iso
+
+prot_h1_nh3 <- test_sig %>% 
+    filter(hyp %in% c("null1", "null3"), ctrx == "CCCP_Satur vs CCCP_Light") %>% 
+    group_by(uniprot_iso) %>% 
+    filter(n() == 1) %>% 
+    ungroup() %>% 
+    filter(hyp == "null1") %>% 
+    .$uniprot_iso
+
+# There's no change detected with H_3 but missed with H_1
+prot_h3_nh1 <- test_sig %>% 
+    filter(hyp %in% c("null1", "null3"), ctrx == "CCCP_Satur vs CCCP_Light") %>% 
+    group_by(uniprot_iso) %>% 
+    filter(n() == 1) %>% 
+    ungroup() %>% 
+    filter(hyp == "null3") %>% 
+    .$uniprot_iso
+
+# pdf("profile_h1_nh3.pdf")
+# for (i in seq_along(prot_h1_nh3)) {
+#     print(plot_nc_profile(dta_conflu, prot_h1_nh3[i], runlvl_bat))
+#     print(plot_nc_sumprofile(dta_conflu, prot_h1_nh3[i], runlvl_bat))
+# }
+# dev.off()
+
+
+# Peptide representation --------------------------------------------------
+# Remove singleton (considering to move toward upstream)
+dta_conflu <- dta_conflu %>% 
+    group_by(uniprot_iso, is_paired, is_mod, feature) %>% 
+    filter(n() != 1) %>% ungroup()
+
+# dta_conflu <- dta_conflu %>% 
+#     group_by(uniprot_iso, peptide_sequence) %>% 
+#     filter(n() != 1) %>% ungroup()
+
+pep_full <- dta_conflu %>% filter(!is_paired, is_mod) %>% 
+    group_by(uniprot_iso, peptide_sequence) %>% 
+    summarise(nb_run = n_distinct(run)) %>% 
+    ungroup() %>% 
+    filter(nb_run == 16)
+
+unmod_full <- dta_conflu %>% 
+    filter(!is_paired, !is_mod) %>% 
+    group_by(uniprot_iso) %>% 
+    summarise(nb_run = n_distinct(run)) %>% 
+    filter(nb_run == 16)
+
+# Keeping only the modified peptides
+df_fullpep <- dta_conflu %>% semi_join(unmod_full) %>% semi_join(pep_full)
+
+# Adding back the unmodified peptides
+df_fullpep <- dta_conflu %>% 
+    filter(!is_paired, !is_mod, uniprot_iso %in% df_fullpep$uniprot_iso) %>% 
+    bind_rows(df_fullpep)
+
+
+prot_fullpep <- unique(df_fullpep$uniprot_iso)
+runlvl_bat <- df_fullpep %>% distinct(biorep, run) %>% arrange(biorep, run) %>% .$run
+
+pdf("profile_fullpep.pdf")
+for (i in seq_along(prot_fullpep)) {
+    print(plot_nc_profile(df_fullpep, prot_fullpep[i], runlvl_bat))
+}
+dev.off()
+
+
+# Reading site data
+df_fasmod <- readRDS("output/fasmod.rds")
+df_fasmod01 <- df_fasmod %>% 
+    filter(nb_mod <= 1) %>% 
+    select(uniprot_iso, peptide_sequence, nb_mod, site_str, pps_str)
+
+df_fullpep %>% inner_join(df_fasmod01)
 
 
 # Profile plots of the 312 proteins ---------------------------------------
@@ -822,36 +933,4 @@ plot_profile(dta_conflu, pp, runlvl)
 plot_profile(dta_conflu, pp, runlvl_bat)
 plot_sumprofile(dta_conflu, pp, runlvl_bat)
 plot_sumprofile(dta_conflu_2bc, pp, runlvl_bat)
-
-
-
-## site/residue centered representation -----------------------------
-
-# mod_idx <- lapply(ref_table$sequence, function(x) as.vector(str_locate_all(x, pattern = mod_residue)[[1]][, 1]))
-# mod_res <- lapply(ref_table$sequence, function(x) c(str_match_all(x, pattern = mod_residue)[[1]]))
-# nb_site <- str_count(ref_table$sequence, mod_residue)
-# protein_indices <- data_frame(uniprot_ac = rep(ref_table$uniprot_ac, nb_mods), 
-#                               ptm_site = unlist(mod_residues), 
-#                               res_index = unlist(mod_indices))
-
-load("~/Projects/NEU/ptm/dev/annot_uniprot.RData")
-
-pep_n_prot <- dta_conflu %>% distinct(peptide_sequence, uniprot_ac)
-
-regex_aa <- "A|C|D|E|F|G|H|I|K|L|M|N|P|Q|R|S|T|V|W|Y"
-regex_aamod <- "A|C|D|E|F|G|H|I|K|L|M|N|P|Q|R|S|T|V|W|Y|\\*"
-
-pep_clean <- lapply(pep_n_prot$peptide_sequence, 
-                    function(x) paste(unlist(str_extract_all(x, pattern = regex_aamod)), collapse = ""))
-pep_unmod <- lapply(pep_clean, function(x) paste(unlist(str_extract_all(x, pattern = regex_aa)), collapse = ""))
-nb_mods <- lapply(pep_clean, function(x) length(c(str_match_all(x, "K\\*")[[1]])))
-
-
-
-
-
-mods_in_pep %>% group_by(uniprot_ac, peptide_seq_clean) %>% 
-    mutate(nb_pep = n()) %>% 
-    ungroup() %>% 
-    filter(nb_pep != 1)
 
