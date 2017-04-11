@@ -813,6 +813,14 @@ dta_conflu <- dta_conflu %>%
 #     group_by(uniprot_iso, peptide_sequence) %>% 
 #     filter(n() != 1) %>% ungroup()
 
+# Reading site data
+df_fasmod <- readRDS("output/fasmod.rds")
+df_fasmod01 <- df_fasmod %>% 
+    filter(nb_mod <= 1) %>% 
+    select(uniprot_iso, peptide_sequence, nb_mod, site_str, pps_str)
+
+dta_conflu <- dta_conflu %>% inner_join(df_fasmod01)
+
 pep_full <- dta_conflu %>% filter(!is_paired, is_mod) %>% 
     group_by(uniprot_iso, peptide_sequence) %>% 
     summarise(nb_run = n_distinct(run)) %>% 
@@ -825,7 +833,7 @@ unmod_full <- dta_conflu %>%
     summarise(nb_run = n_distinct(run)) %>% 
     filter(nb_run == 16)
 
-# Keeping only the modified peptides
+# Keeping only the modified peptides (with unpaired unmodified peptides)
 df_fullpep <- dta_conflu %>% semi_join(unmod_full) %>% semi_join(pep_full)
 
 # Adding back the unmodified peptides
@@ -834,23 +842,55 @@ df_fullpep <- dta_conflu %>%
     bind_rows(df_fullpep)
 
 
+# prot_fullpep <- unique(df_fullpep$uniprot_iso)
+# runlvl_bat <- df_fullpep %>% distinct(biorep, run) %>% arrange(biorep, run) %>% .$run
+# pdf("profile_fullpep.pdf")
+# for (i in seq_along(prot_fullpep)) {
+#     print(plot_nc_profile(df_fullpep, prot_fullpep[i], runlvl_bat))
+# }
+# dev.off()
+
+
+# Profile plots for site data ---------------------------------------------
+plot_sprofile <- function(df_allprot, protein, run_level) {
+    df_prot <- df_allprot %>% filter(uniprot_iso == protein) %>% filter(!is_paired)
+    # Complete possible combinations of peptide features and runs
+    mpar <- df_prot %>% distinct(site_str, feature, is_mod)
+    df_fill <- df_prot %>% 
+        select(feature, run, log2inty) %>% 
+        complete(run = run_level, feature) %>% 
+        left_join(mpar) %>% 
+        mutate(is_mod_fac = factor(ifelse(is_mod, "Modified", "Unmodified")), 
+               run_fac = factor(run, levels = run_level))
+    # Feature profiles categorized by modification and matching status
+    filter(df_fill, is_mod) %>% 
+        ggplot(aes(run_fac, log2inty, group = feature, colour = site_str)) + 
+        geom_point(size = 2, alpha = 0.5) +
+        geom_line() + 
+        geom_line(data = filter(df_fill, !is_mod), aes(run_fac, log2inty, group = feature), colour = "gray") + 
+        geom_point(data = filter(df_fill, !is_mod), aes(run_fac, log2inty), colour = "gray", size = 2) + 
+        geom_vline(xintercept = 8.5) + 
+        facet_grid(is_mod_fac ~ .) + 
+        coord_cartesian(ylim = c(10, 35)) + 
+        labs(x = "Run", y = "Log2-intensity", title = protein) + 
+        theme_bw() + 
+        guides(colour = guide_legend(nrow = 1)) + 
+        theme(legend.position = "bottom") + 
+        theme(axis.text.x = element_blank())
+}
+
+
+# Profile plots of site data
 prot_fullpep <- unique(df_fullpep$uniprot_iso)
 runlvl_bat <- df_fullpep %>% distinct(biorep, run) %>% arrange(biorep, run) %>% .$run
 
-pdf("profile_fullpep.pdf")
+pdf("profile_site.pdf", width = 8, height = 6)
 for (i in seq_along(prot_fullpep)) {
-    print(plot_nc_profile(df_fullpep, prot_fullpep[i], runlvl_bat))
+    print(plot_sprofile(df_fullpep, prot_fullpep[i], runlvl_bat))
 }
 dev.off()
 
 
-# Reading site data
-df_fasmod <- readRDS("output/fasmod.rds")
-df_fasmod01 <- df_fasmod %>% 
-    filter(nb_mod <= 1) %>% 
-    select(uniprot_iso, peptide_sequence, nb_mod, site_str, pps_str)
-
-df_fullpep %>% inner_join(df_fasmod01)
 
 
 # Profile plots of the 312 proteins ---------------------------------------
