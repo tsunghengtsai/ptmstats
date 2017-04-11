@@ -146,7 +146,7 @@ df_fasmod %>%
     ) %>% 
     filter(nb_mod != nb_smod)
 
-
+# Modification sites
 df_fasmod <- df_fasmod %>% 
     mutate(
         site_all = map2(str_locate_all(trimmed_pep, mod_residue), pep_idx,  
@@ -169,15 +169,22 @@ df_fasmod %>% select(uniprot_iso, trimmed_mod, trimmed_pep, site_all, site_mod, 
 
 
 # Annotate modification site
-ant_site <- function(index, residue) {
-    ant_str <- if (is_empty(index)) "UNMOD" else str_c(residue, index, collapse = "-")
-    
+ant_site <- function(index, index_full, residue) {
+    if (is_empty(index)) {
+        ant_str <- "UNMOD"
+    } else {
+        ant_len <- max(str_length(index_full))
+        ant_idx <- str_pad(index, width = ant_len, pad = "0")
+        ant_str <- str_c(residue, ant_idx, collapse = "-")
+    }
+
     return(ant_str)
 }
 
 df_fasmod <- df_fasmod %>% 
     mutate(
-        site_str = map_chr(site_mod, ant_site, mod_residue), 
+        site_str = map2_chr(site_mod, mod_idx, ant_site, mod_residue), 
+        # site_str = map_chr(site_mod, ant_site, mod_residue), 
         pep_str = map_chr(pep_idx, ~ str_c(., collapse = "-")), 
         pps_str = str_c(uniprot_iso, pep_str, site_str, sep = "_")
     )
