@@ -1,28 +1,32 @@
+# Load libraries and sources ----------------------------------------------
 library(tidyverse)
 library(stringr)
 library(broom)
 library(survival)
 
+source("utilities.R")
+
 
 # Load data set & housekeeping --------------------------------------------
 load("output/dta_conflu.RData")
 
-# Confidence threshold
-dta_conflu <- dta_conflu %>% filter(vista_confidence_score >= 83)
+df_conflu <- dta_conflu
+rm(dta_conflu)
 
-df_design <- tbl_df(df_design)
-
-dta_conflu <- dta_conflu %>% 
-    select(-vista_confidence_score, -peptide_trypticity, -peptide_miscleavages, 
-           -peptide_validity)
+# Confidence threshold 83
+df_conflu <- df_conflu %>% 
+    filter(vista_confidence_score >= 83) %>% 
+    select(-vista_confidence_score, -peptide_trypticity, 
+           -peptide_miscleavages, -peptide_validity)
 
 # OBJ# can be viewed as a batch identity
 subj_uniq <- unique(df_design$id_subject)
 subj_key <- str_c("S", str_pad(seq_along(subj_uniq), width = 2, pad = "0"))
-df_design <- df_design %>% 
+df_design <- tbl_df(df_design) %>% 
     mutate(
         subj = plyr::mapvalues(id_subject, from = subj_uniq, to = subj_key), 
         biorep = if_else(ann_objective_id == 37122, "B1", "B2"), 
+        batch = biorep, 
         techrep = str_c("T", id_injectionset), 
         run_bt = str_c(biorep, techrep), 
         run_cbt = str_c(id_subject, run_bt, sep = "-")
@@ -30,78 +34,81 @@ df_design <- df_design %>%
 
 
 # Annotation & data filtering ---------------------------------------------
-dta_conflu <- dta_conflu %>% 
+df_conflu <- df_conflu %>% 
+    rename(peptide = peptide_sequence) %>% 
     mutate(
-        is_mod = str_detect(peptide_sequence, "\\*"), 
-        feature = str_c(peptide_sequence, ms2_charge, sep = "_"), 
+        is_mod = str_detect(peptide, "\\*"), 
+        feature = str_c(peptide, ms2_charge, sep = "_"), 
         log2inty = log2(vista_peak_area_light), 
-        cond = plyr::mapvalues(run_id, from = df_design$run_id, to = df_design$id_subject), 
+        condition = plyr::mapvalues(run_id, from = df_design$run_id, to = df_design$id_subject), 
         biorep = plyr::mapvalues(run_id, from = df_design$run_id, to = df_design$biorep), 
+        batch = plyr::mapvalues(run_id, from = df_design$run_id, to = df_design$batch), 
         techrep = plyr::mapvalues(run_id, from = df_design$run_id, to = df_design$techrep), 
         run = plyr::mapvalues(run_id, from = df_design$run_id, to = df_design$run_cbt)
     )
 
+
 # Extract original peptide sequence & other information
-df_pep <- dta_conflu %>% 
-    distinct(peptide_sequence, is_mod) %>% 
+df_pep <- df_conflu %>% 
+    distinct(peptide, is_mod) %>% 
     mutate(
-        unmod_peptide = str_replace_all(peptide_sequence, "\\*", ""), 
-        trimmed_pep = str_extract(unmod_peptide, "(?<=\\.)([ACDEFGHIKLMNPQRSTVWY\\*]+)"), 
-        trimmed_mod = str_extract(peptide_sequence, "(?<=\\.)([ACDEFGHIKLMNPQRSTVWY\\*]+)"), 
-        nb_aa = str_length(trimmed_pep)
+        peptide_unmod = str_replace_all(peptide, "\\*", ""), 
+        peptide_unmod_trimmed = str_extract(peptide_unmod, "(?<=\\.)([ACDEFGHIKLMNPQRSTVWY\\*]+)"), 
+        peptide_trimmed = str_extract(peptide, "(?<=\\.)([ACDEFGHIKLMNPQRSTVWY\\*]+)"), 
+        nb_aa = str_length(peptide_unmod_trimmed)
     )
 
 # Retain peptides with length >= 6
 df_pep <- df_pep %>% filter(nb_aa >= 6)
 
 # Determine the pairing status of peptide
-df_pep <- df_pep %>% group_by(unmod_peptide) %>% 
+df_pep <- df_pep %>% group_by(peptide_unmod) %>% 
     mutate(is_paired = ifelse(n_distinct(is_mod) == 2, TRUE, FALSE)) %>% 
     ungroup()
 
 # Initial filtering
 regex_uniprot <- ".*([OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}).*"
-dta_conflu <- dta_conflu %>% 
+df_conflu <- df_conflu %>% 
     semi_join(df_pep) %>% 
     filter(!is.na(ms2_charge), !is.na(ms2_rt), grepl(regex_uniprot, Reference))
 
 # Extract uniprot accession number
-dta_conflu <- dta_conflu %>% 
+df_conflu <- df_conflu %>% 
     separate(Reference, into = c("p_entry", "uniprot_iso"), sep = "\\|", remove = FALSE)
 
 
 # Data manipulation & transformation --------------------------------------
 # Use the max for duplicate features (per run)
-dta_conflu <- dta_conflu %>% 
-    group_by(Reference, uniprot_iso, peptide_sequence, is_mod, feature, cond, biorep, run) %>% 
+df_conflu <- df_conflu %>% 
+    group_by(Reference, uniprot_iso, peptide, is_mod, feature, condition, biorep, run) %>% 
     summarise(log2inty = max(log2inty)) %>% 
     ungroup()
 
 # Remove peptides with ambiguous matches (to >1 Reference): more stringent than 
 # mapping with uniprot_iso, as multiple Reference may map to the same uniprot_iso
-# Example: dta_conflu %>% filter(feature == "K.AFSLK*TSTSAVR.H_3", run == "CCCP_Light-B1T1")
-pep2uniprot <- dta_conflu %>% 
-    distinct(peptide_sequence, Reference) %>% 
-    count(peptide_sequence)
+# Example: df_conflu %>% filter(feature == "K.AFSLK*TSTSAVR.H_3", run == "CCCP_Light-B1T1")
+pep2uniprot <- df_conflu %>% 
+    distinct(peptide, Reference) %>% 
+    count(peptide)
 
-dta_conflu <- dta_conflu %>% 
+df_conflu <- df_conflu %>% 
     semi_join(filter(pep2uniprot, n == 1))
 
 # Remove singleton features
-dta_conflu <- dta_conflu %>% 
+df_conflu <- df_conflu %>% 
     group_by(uniprot_iso, feature) %>% 
     filter(n() != 1) %>% ungroup()
 
 # Status of peptide pairing & protein normalization
-dta_conflu <- dta_conflu %>% 
-    left_join(select(df_pep, peptide_sequence, unmod_peptide, is_paired)) %>% 
+df_conflu <- df_conflu %>% 
+    left_join(select(df_pep, peptide, peptide_unmod, is_paired)) %>% 
     group_by(uniprot_iso) %>% 
     mutate(is_ref = any(!is_paired & !is_mod)) %>% ungroup()
 
 
 # Visualization -----------------------------------------------------------
 # QC plot (boxplot)
-dta_conflu %>% 
+df_conflu %>% 
     mutate(is_mod_fac = factor(ifelse(is_mod, "Modified", "Unmodified"))) %>% 
     ggplot(aes(run, log2inty)) + 
     geom_boxplot(aes(fill = biorep)) + 
@@ -110,224 +117,105 @@ dta_conflu %>%
     labs(x = "Run", y = "Log2-intensity")
 
 # Number of modified/unmodified peptides
-dta_conflu %>% 
-    distinct(cond, biorep, run, peptide_sequence, is_mod) %>% 
-    group_by(cond, biorep, run) %>% 
+df_conflu %>% 
+    distinct(condition, biorep, run, peptide, is_mod) %>% 
+    group_by(condition, biorep, run) %>% 
     summarise(Modified = sum(is_mod), Unmodified = sum(!is_mod)) %>% 
     ungroup() %>% 
     gather(mod, nb_peptide, Modified:Unmodified) %>% 
-    ggplot(aes(cond, nb_peptide)) + 
+    ggplot(aes(condition, nb_peptide)) + 
     geom_jitter(aes(colour = biorep, shape = mod), width = 0.1, size = 4) + 
     labs(x = "Condition", y = "Number of peptides")
 
 
-# TMP summarization functions ---------------------------------------------
-# Summarization of feature intensities of a protein using Tukey's median polish
-sumprot_tmp <- function(df_prot) {
-    # Required fields of df_prot: feature, run, log2inty
-    inty_wide <- df_prot %>% select(feature, run, log2inty) %>% spread(feature, log2inty)
-    inty_mat <- data.matrix(inty_wide[, -1])
-    mp_out <- medpolish(inty_mat, na.rm = TRUE, trace.iter = FALSE)
-    sum_df <- data_frame(run = inty_wide$run, log2inty = mp_out$overall + mp_out$row)
-    
-    return(sum_df)
-}
-
-
-# Run-level summarization (within batch)
-sum_feature_bch <- function(df_allprot, proteins) {
-    # Housekeeping
-    proteins <- unique(proteins)
-    df_allprot <- df_allprot %>% filter(uniprot_iso %in% proteins)
-    # Nested data frame (protein, mod, paired, batch)
-    nest_allprot <- df_allprot %>% 
-        group_by(uniprot_iso, is_mod, is_paired, biorep) %>% 
-        nest()
-    # TMP summarization with function sumprot_tmp
-    nest_allprot <- nest_allprot %>% 
-        mutate(sumtmp = map(data, sumprot_tmp))
-    
-    return(unnest(nest_allprot, sumtmp) %>% rename(log2inty_tmp = log2inty))
-}
-
-
-# Run-level summarization (across batches)
-sum_feature <- function(df_allprot, proteins) {
-    # Housekeeping
-    proteins <- unique(proteins)
-    df_allprot <- df_allprot %>% filter(uniprot_iso %in% proteins)
-    # Nested data frame (protein, mod, paired)
-    nest_allprot <- df_allprot %>% 
-        group_by(uniprot_iso, is_mod, is_paired) %>% 
-        nest()
-    # TMP summarization with function sumprot_tmp
-    nest_allprot <- nest_allprot %>% 
-        mutate(sumtmp = map(data, sumprot_tmp))
-    
-    return(unnest(nest_allprot, sumtmp) %>% rename(log2inty_tmp = log2inty))
-}
-
-
-# Summarization within batch 
-#  - require site_str annotation
-#  - not conisder unpaired features, multi-site modifications
-sum_siteftr_bch <- function(df_allprot, proteins) {
-    # Housekeeping
-    proteins <- unique(proteins)
-    df_allprot <- df_allprot %>% filter(uniprot_iso %in% proteins)
-    # Nested data frame (protein, site, batch)
-    nest_allprot <- df_allprot %>% 
-        group_by(uniprot_iso, site_str, biorep) %>% 
-        nest()
-    # TMP summarization with function sumprot_tmp
-    nest_allprot <- nest_allprot %>% 
-        mutate(sumtmp = map(data, sumprot_tmp))
-    
-    return(unnest(nest_allprot, sumtmp) %>% rename(log2inty_tmp = log2inty))
-}
-
-
 # Peptide representation --------------------------------------------------
 # Reading site data
-df_fasmod <- readRDS("output/fasmod.rds")
+df_fasmod <- readRDS("output/fasmod.rds") %>% 
+    rename(
+        peptide = peptide_sequence, 
+        peptide_unmod = unmod_peptide, 
+        peptide_unmod_trimmed = trimmed_pep, 
+        peptide_trimmed = trimmed_mod
+    )
 
 # Ignore multi-site modifications to avoid confounding
 df_fasmod01 <- df_fasmod %>% 
     filter(nb_mod <= 1) %>% 
-    select(uniprot_iso, peptide_sequence, nb_mod, site_str, pps_str)
+    select(uniprot_iso, peptide, nb_mod, site_str, pps_str)
 
-dta_conflu <- dta_conflu %>% inner_join(df_fasmod01)
+df_conflu <- df_conflu %>% inner_join(df_fasmod01)
 
-pep_full <- dta_conflu %>% 
+site_full <- df_conflu %>% 
     filter(!is_paired, is_mod) %>% 
     group_by(uniprot_iso, site_str) %>% 
     summarise(nb_run = n_distinct(run)) %>% 
     ungroup() %>% 
     filter(nb_run == 16)
 
-unmod_full <- dta_conflu %>% 
+unmod_full <- df_conflu %>% 
     filter(!is_paired, !is_mod) %>% 
     group_by(uniprot_iso) %>% 
     summarise(nb_run = n_distinct(run)) %>% 
     filter(nb_run == 16)
 
 # Keeping only the modified peptides (with unpaired unmodified peptides)
-df_fullpep <- dta_conflu %>% semi_join(unmod_full) %>% semi_join(pep_full)
+df_site <- df_conflu %>% semi_join(unmod_full) %>% semi_join(site_full)
 
 # Adding back the unmodified peptides
-df_fullpep <- dta_conflu %>% 
-    filter(!is_paired, !is_mod, uniprot_iso %in% df_fullpep$uniprot_iso) %>% 
-    bind_rows(df_fullpep)
-
-
-
-# Profile plots for site data ---------------------------------------------
-plot_sprofile <- function(df_allprot, protein, run_level) {
-    df_prot <- df_allprot %>% filter(uniprot_iso == protein) %>% filter(!is_paired)
-    # Complete possible combinations of peptide features and runs
-    mpar <- df_prot %>% distinct(site_str, feature, is_mod)
-    df_fill <- df_prot %>% 
-        select(feature, run, log2inty) %>% 
-        complete(run = run_level, feature) %>% 
-        left_join(mpar) %>% 
-        mutate(is_mod_fac = factor(ifelse(is_mod, "Modified", "Unmodified")), 
-               run_fac = factor(run, levels = run_level))
-    # Feature profiles categorized by modification and matching status
-    filter(df_fill, is_mod) %>% 
-        ggplot(aes(run_fac, log2inty, group = feature, colour = site_str)) + 
-        geom_point(size = 2, alpha = 0.5) +
-        geom_line(alpha = 0.75) + 
-        geom_line(data = filter(df_fill, !is_mod), aes(run_fac, log2inty, group = feature), colour = "gray") + 
-        geom_point(data = filter(df_fill, !is_mod), aes(run_fac, log2inty), colour = "gray", size = 2) + 
-        geom_vline(xintercept = 8.5) + 
-        facet_grid(is_mod_fac ~ .) + 
-        coord_cartesian(ylim = c(10, 35)) + 
-        labs(x = "Run", y = "Log2-intensity", title = protein) + 
-        theme_bw() + 
-        guides(colour = guide_legend(nrow = 1, title = NULL)) + 
-        # theme(legend.position = "bottom") + 
-        theme(legend.position = c(0.5, 0.065)) + 
-        theme(axis.text.x = element_blank())
-}
-
-
-# Export profile plots ----------------------------------------------------
-# Profile plots of site data
-prot_fullpep <- unique(df_fullpep$uniprot_iso)
-runlvl_bat <- df_fullpep %>% distinct(biorep, run) %>% arrange(biorep, run) %>% .$run
-
-pdf("profile_site.pdf", width = 8, height = 6)
-for (i in seq_along(prot_fullpep)) {
-    print(plot_sprofile(df_fullpep, prot_fullpep[i], runlvl_bat))
-}
-dev.off()
-
+df_site <- df_conflu %>% 
+    filter(!is_paired, !is_mod, uniprot_iso %in% df_site$uniprot_iso) %>% 
+    bind_rows(df_site)
 
 
 # Filtering and imputation ------------------------------------------------
-
-# 50% cutoff
-df_fullpep2 <- df_fullpep %>% 
+# A feature is considered valid only when it yields > 50% coverage
+df_site2 <- df_site %>% 
     group_by(uniprot_iso, feature, biorep) %>% 
     mutate(nb_run = n_distinct(run)) %>% 
     ungroup() %>% 
     filter(nb_run > 4)
 
-pdf("profile_site2.pdf", width = 8, height = 6)
-for (i in seq_along(prot_fullpep)) {
-    print(plot_sprofile(df_fullpep2, prot_fullpep[i], runlvl_bat))
-}
-dev.off()
-
-
-# Imputation with AFT model
-
-add_censor <- function(data) {
-    augdata <- data %>% 
-        mutate(ind_obs = ifelse(is.na(log2inty), 0, 1)) %>% 
-        group_by(feature) %>% 
-        mutate(log2inty_aft = ifelse(ind_obs == 0, 0.99 * min(log2inty[ind_obs == 1]), log2inty)) %>% 
-        ungroup()
-    
-    return(augdata)
-}
-
-predict_censor <- function(aftdata) {
-    if (n_distinct(aftdata$feature) == 1) return(aftdata)  # only one feature
-    if (all(aftdata$ind_obs == 1)) return(aftdata)  # no missing value
-    
-    fit <- survreg(Surv(log2inty_aft, ind_obs, type = "left") ~ run + feature,
-                   data = aftdata, dist = "gaussian")
-    aftdata <- aftdata %>% 
-        mutate(
-            log2inty_pred = predict(fit), 
-            log2inty_aft = ifelse(ind_obs == 0, log2inty_pred, log2inty_aft)
-        ) %>% 
-        select(-log2inty_pred)
-    
-    return(aftdata)
-}
-
-nested_fullpep <- df_fullpep2 %>% 
+nested_site <- df_site2 %>% 
     select(uniprot_iso, site_str, feature, biorep, run, log2inty) %>% 
     group_by(uniprot_iso, site_str, biorep) %>% 
     nest()
 
-nested_fullpep <- nested_fullpep %>% 
+nested_site <- nested_site %>% 
     mutate(data = map(data, ~ complete(., feature, run)))
 
-nested_fullpep <- nested_fullpep %>% 
+nested_site <- nested_site %>% 
     mutate(
-        aftdata = map(data, add_censor), 
-        aftdata = map(aftdata, predict_censor)
+        aftdata = map(data, annot_obs), 
+        aftdata = map(aftdata, fill_censored)
     )
 
-nested_fullpep %>% unnest(aftdata)
+df_site_aft <- nested_site %>% 
+    unnest(aftdata) %>% 
+    mutate(is_mod = site_str != "UNMOD")
+
+
+# Export profile plots ----------------------------------------------------
+# Profile plots of site data
+prot_fullpep <- sort(unique(df_site$uniprot_iso))
+runlvl_bat <- df_site %>% distinct(biorep, run) %>% arrange(biorep, run) %>% .$run
+
+pdf("profile_site.pdf", width = 8, height = 6)
+for (i in seq_along(prot_fullpep)) {
+    print(plot_sprofile(df_site, prot_fullpep[i], runlvl_bat))
+}
+dev.off()
+
+
+pdf("profile_site_aft.pdf", width = 8, height = 6)
+for (i in seq_along(prot_fullpep)) {
+    print(plot_sprofile_aft(df_site_aft, prot_fullpep[i], runlvl_bat))
+}
+dev.off()
 
 
 # Site-level summarization ------------------------------------------------
-prot_fullpep <- unique(df_fullpep$uniprot_iso)
-df_sumsite <- sum_siteftr_bch(df_fullpep, prot_fullpep)  # per batch
+prot_fullpep <- unique(df_site$uniprot_iso)
+df_sumsite <- sum_siteftr_bch(df_site, prot_fullpep)  # per batch
 
 
 # Site-level modeling -----------------------------------------------------
@@ -339,7 +227,7 @@ df_sumsite <- df_sumsite %>%
     mutate(batch = ifelse(grepl("B1", biotech), "B1", "B2")) %>% 
     unite(protsite, uniprot_iso, site_str, sep = "-")
 
-# A batch per model
+# One model per batch
 nested_perbch <- df_sumsite %>% 
     group_by(protsite, batch) %>%
     nest() %>% 
@@ -351,8 +239,7 @@ param_perbch <- nested_perbch %>%
     mutate(group = gsub("group", "", term)) %>% 
     select(-term, -statistic, -p.value)
 
-
-# All bathces in one model
+# One model for all batches
 nested_allbch <- df_sumsite %>% 
     group_by(protsite) %>%
     nest() %>% 
@@ -449,59 +336,4 @@ test_all %>% ggplot(aes(hyp, -log10(p_adj))) +
 
 test_sig <- test_all %>% filter(p_adj < 0.05) %>% 
     separate(protsite, into = c("uniprot_iso", "site_str"), sep = "-", remove = FALSE) 
-
-
-
-
-# Some plots --------------------------------------------------------------
-
-# df_fullpep %>% plot_sprofile(pp, runlvl_bat)
-
-# USP30 "UBP30_HUMAN" - 00
-pp <- "Q70CQ3"
-
-# MFN1 "MFN1_HUMAN" - 00
-pp <- "Q8IWA4"
-
-# Parkin "PRKN2_HUMAN" - **
-pp <- "O60260"
-test_sig %>% filter(str_detect(protsite, pp)) %>% arrange(protsite, ctrx, hyp)
-df_fullpep %>% plot_sprofile(pp, runlvl_bat)
-df_fullpep %>% semi_join(filter(test_sig, uniprot_iso == pp)) %>% plot_sprofile(pp, runlvl_bat)
-
-# Tomm20 "TOM20_HUMAN" - 00
-pp <- "Q15388"
-
-# VDAC "VDAC3_HUMAN" - 00
-pp <- "Q9Y277"
-
-# VDAC "VDAC1_HUMAN" **
-pp <- "P21796"
-test_sig %>% filter(str_detect(protsite, pp)) %>% arrange(protsite, ctrx, hyp)
-df_fullpep %>% filter(is_mod) %>% plot_sprofile(pp, runlvl_bat)
-df_fullpep %>% semi_join(filter(test_sig, uniprot_iso == pp)) %>% plot_sprofile(pp, runlvl_bat)
-
-# VDAC "VDAC2_HUMAN" ** 
-pp <- "P45880"
-test_sig %>% filter(str_detect(protsite, pp)) %>% arrange(protsite, ctrx, hyp)
-df_fullpep %>% filter(is_mod) %>% plot_sprofile(pp, runlvl_bat)
-df_fullpep %>% semi_join(filter(test_sig, uniprot_iso == pp)) %>% plot_sprofile(pp, runlvl_bat)
-
-# GAPDH "G3P_HUMAN" **
-pp <- "P04406"
-test_sig %>% filter(str_detect(protsite, pp)) %>% arrange(protsite, ctrx, hyp)
-df_fullpep %>% filter(is_mod) %>% plot_sprofile(pp, runlvl_bat)
-df_fullpep %>% semi_join(filter(test_sig, uniprot_iso == pp)) %>% plot_sprofile(pp, runlvl_bat)
-
-# Actin "ACTB_HUMAN" **
-pp <- "P60709"
-test_sig %>% filter(str_detect(protsite, pp)) %>% arrange(protsite, ctrx, hyp)
-df_fullpep %>% filter(is_mod) %>% plot_sprofile(pp, runlvl_bat)
-df_fullpep %>% semi_join(filter(test_sig, uniprot_iso == pp)) %>% plot_sprofile(pp, runlvl_bat)
-
-# Ubiquitin "RL40_HUMAN" 
-pp <- "P62987"
-test_sig %>% filter(str_detect(protsite, pp)) %>% arrange(protsite, ctrx, hyp)
-df_fullpep %>% filter(is_mod) %>% plot_sprofile(pp, runlvl_bat)
-df_fullpep %>% semi_join(filter(test_sig, uniprot_iso == pp)) %>% plot_sprofile(pp, runlvl_bat)
 
