@@ -1,6 +1,7 @@
 library(tidyverse)
 library(stringr)
 library(broom)
+library(survival)
 
 
 # Load data set & housekeeping --------------------------------------------
@@ -250,7 +251,6 @@ plot_sprofile <- function(df_allprot, protein, run_level) {
 }
 
 
-
 # Export profile plots ----------------------------------------------------
 # Profile plots of site data
 prot_fullpep <- unique(df_fullpep$uniprot_iso)
@@ -261,6 +261,68 @@ for (i in seq_along(prot_fullpep)) {
     print(plot_sprofile(df_fullpep, prot_fullpep[i], runlvl_bat))
 }
 dev.off()
+
+
+
+# Filtering and imputation ------------------------------------------------
+
+# 50% cutoff
+df_fullpep2 <- df_fullpep %>% 
+    group_by(uniprot_iso, feature, biorep) %>% 
+    mutate(nb_run = n_distinct(run)) %>% 
+    ungroup() %>% 
+    filter(nb_run > 4)
+
+pdf("profile_site2.pdf", width = 8, height = 6)
+for (i in seq_along(prot_fullpep)) {
+    print(plot_sprofile(df_fullpep2, prot_fullpep[i], runlvl_bat))
+}
+dev.off()
+
+
+# Imputation with AFT model
+
+add_censor <- function(data) {
+    augdata <- data %>% 
+        mutate(ind_obs = ifelse(is.na(log2inty), 0, 1)) %>% 
+        group_by(feature) %>% 
+        mutate(log2inty_aft = ifelse(ind_obs == 0, 0.99 * min(log2inty[ind_obs == 1]), log2inty)) %>% 
+        ungroup()
+    
+    return(augdata)
+}
+
+predict_censor <- function(aftdata) {
+    if (n_distinct(aftdata$feature) == 1) return(aftdata)  # only one feature
+    if (all(aftdata$ind_obs == 1)) return(aftdata)  # no missing value
+    
+    fit <- survreg(Surv(log2inty_aft, ind_obs, type = "left") ~ run + feature,
+                   data = aftdata, dist = "gaussian")
+    aftdata <- aftdata %>% 
+        mutate(
+            log2inty_pred = predict(fit), 
+            log2inty_aft = ifelse(ind_obs == 0, log2inty_pred, log2inty_aft)
+        ) %>% 
+        select(-log2inty_pred)
+    
+    return(aftdata)
+}
+
+nested_fullpep <- df_fullpep2 %>% 
+    select(uniprot_iso, site_str, feature, biorep, run, log2inty) %>% 
+    group_by(uniprot_iso, site_str, biorep) %>% 
+    nest()
+
+nested_fullpep <- nested_fullpep %>% 
+    mutate(data = map(data, ~ complete(., feature, run)))
+
+nested_fullpep <- nested_fullpep %>% 
+    mutate(
+        aftdata = map(data, add_censor), 
+        aftdata = map(aftdata, predict_censor)
+    )
+
+nested_fullpep %>% unnest(aftdata)
 
 
 # Site-level summarization ------------------------------------------------
