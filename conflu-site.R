@@ -40,7 +40,7 @@ df_conflu <- df_conflu %>%
         is_mod = str_detect(peptide, "\\*"), 
         feature = str_c(peptide, ms2_charge, sep = "_"), 
         log2inty = log2(vista_peak_area_light), 
-        condition = plyr::mapvalues(run_id, from = df_design$run_id, to = df_design$id_subject), 
+        group = plyr::mapvalues(run_id, from = df_design$run_id, to = df_design$id_subject), 
         biorep = plyr::mapvalues(run_id, from = df_design$run_id, to = df_design$biorep), 
         batch = plyr::mapvalues(run_id, from = df_design$run_id, to = df_design$batch), 
         techrep = plyr::mapvalues(run_id, from = df_design$run_id, to = df_design$techrep), 
@@ -80,7 +80,7 @@ df_conflu <- df_conflu %>%
 # Data manipulation & transformation --------------------------------------
 # Use the max for duplicate features (per run)
 df_conflu <- df_conflu %>% 
-    group_by(Reference, uniprot_iso, peptide, is_mod, feature, condition, biorep, run) %>% 
+    group_by(Reference, uniprot_iso, peptide, is_mod, feature, group, batch, run) %>% 
     summarise(log2inty = max(log2inty)) %>% 
     ungroup()
 
@@ -95,9 +95,14 @@ df_conflu <- df_conflu %>%
     semi_join(filter(pep2uniprot, n == 1))
 
 # Remove singleton features
+# df_conflu <- df_conflu %>% 
+#     group_by(uniprot_iso, feature) %>% 
+#     filter(n() != 1) %>% ungroup()
+
+# Remove non-valid features without sufficient coverage (50%)
 df_conflu <- df_conflu %>% 
-    group_by(uniprot_iso, feature) %>% 
-    filter(n() != 1) %>% ungroup()
+    group_by(uniprot_iso, feature, batch) %>% 
+    filter(n() >= 4) %>% ungroup()
 
 # Status of peptide pairing & protein normalization
 df_conflu <- df_conflu %>% 
@@ -111,21 +116,21 @@ df_conflu <- df_conflu %>%
 df_conflu %>% 
     mutate(is_mod_fac = factor(ifelse(is_mod, "Modified", "Unmodified"))) %>% 
     ggplot(aes(run, log2inty)) + 
-    geom_boxplot(aes(fill = biorep)) + 
+    geom_boxplot(aes(fill = batch)) + 
     facet_wrap(~ is_mod_fac) + 
     theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
     labs(x = "Run", y = "Log2-intensity")
 
 # Number of modified/unmodified peptides
 df_conflu %>% 
-    distinct(condition, biorep, run, peptide, is_mod) %>% 
-    group_by(condition, biorep, run) %>% 
+    distinct(group, batch, run, peptide, is_mod) %>% 
+    group_by(group, batch, run) %>% 
     summarise(Modified = sum(is_mod), Unmodified = sum(!is_mod)) %>% 
     ungroup() %>% 
     gather(mod, nb_peptide, Modified:Unmodified) %>% 
-    ggplot(aes(condition, nb_peptide)) + 
-    geom_jitter(aes(colour = biorep, shape = mod), width = 0.1, size = 4) + 
-    labs(x = "Condition", y = "Number of peptides")
+    ggplot(aes(group, nb_peptide)) + 
+    geom_jitter(aes(colour = batch, shape = mod), width = 0.1, size = 4) + 
+    labs(x = "Group", y = "Number of peptides")
 
 
 # Peptide representation --------------------------------------------------
@@ -167,37 +172,91 @@ df_site <- df_conflu %>%
     bind_rows(df_site)
 
 
-# Filtering and imputation ------------------------------------------------
-# A feature is considered valid only when it yields > 50% coverage
-df_site2 <- df_site %>% 
-    group_by(uniprot_iso, feature, biorep) %>% 
-    mutate(nb_run = n_distinct(run)) %>% 
-    ungroup() %>% 
-    filter(nb_run > 4)
-
-nested_site <- df_site2 %>% 
-    select(uniprot_iso, site_str, feature, biorep, run, log2inty) %>% 
-    group_by(uniprot_iso, site_str, biorep) %>% 
+# Imputation and summarization --------------------------------------------
+nested_site <- df_site %>% 
+    select(uniprot_iso, site_str, feature, batch, run, log2inty) %>% 
+    group_by(uniprot_iso, site_str, batch) %>% 
     nest()
 
 nested_site <- nested_site %>% 
     mutate(data = map(data, ~ complete(., feature, run)))
 
+# AFT imputation and MP summarization
 nested_site <- nested_site %>% 
     mutate(
         aftdata = map(data, annot_obs), 
-        aftdata = map(aftdata, fill_censored)
+        aftdata = map(aftdata, fill_censored), 
+        mp_sum = map(data, sumprot_tmp), 
+        mp_aftsum = map(aftdata, sumprot_tmp)
     )
 
-df_site_aft <- nested_site %>% 
-    unnest(aftdata) %>% 
-    mutate(is_mod = site_str != "UNMOD")
+
+# Fit per-batch and all-batch models --------------------------------------
+# Add group information
+run2group <- df_site %>% distinct(run, group)
+df_sum <- nested_site %>% unnest(mp_sum) %>% left_join(run2group)
+df_sum_aft <- nested_site %>% unnest(mp_aftsum) %>% left_join(run2group)
+
+# One model per batch
+nested_perbch <- df_sum %>% 
+    group_by(uniprot_iso, site_str, batch) %>% 
+    nest() %>% 
+    mutate(
+        lm_fit = map(data, ~ lm(log2inty ~ 0 + group, data = .)), 
+        param = map(lm_fit, tidy), 
+        df_res = map_dbl(lm_fit, df.residual)
+    )
+
+nested_perbch_aft <- df_sum_aft %>% 
+    group_by(uniprot_iso, site_str, batch) %>% 
+    nest() %>% 
+    mutate(
+        lm_fit = map(data, ~ lm(log2inty ~ 0 + group, data = .)), 
+        param = map(lm_fit, tidy), 
+        df_res = map_dbl(lm_fit, df.residual)
+    )
+
+# One model for all batches
+nested_allbch <- df_sum %>% 
+    group_by(uniprot_iso, site_str) %>% 
+    nest() %>% 
+    mutate(
+        lm_fit = map(data, ~ lm(log2inty ~ 0 + group + batch, data = .)), 
+        param = map(lm_fit, tidy), 
+        df_res = map_dbl(lm_fit, df.residual)
+    )
+
+nested_allbch_aft <- df_sum_aft %>% 
+    group_by(uniprot_iso, site_str) %>% 
+    nest() %>% 
+    mutate(
+        lm_fit = map(data, ~ lm(log2inty ~ 0 + group + batch, data = .)), 
+        param = map(lm_fit, tidy), 
+        df_res = map_dbl(lm_fit, df.residual)
+    )
+
+
+# Reshape parameters ------------------------------------------------------
+param_perbch <- nested_perbch_aft %>% 
+    unnest(param) %>% 
+    filter(site_str != "UNMOD") %>% 
+    mutate(group = gsub("group", "", term)) %>% 
+    select(-term, -statistic, -p.value) %>% 
+    unite(protsite, uniprot_iso, site_str, sep = "-")
+
+param_allbch <- nested_allbch_aft %>% 
+    unnest(param) %>% 
+    filter(site_str != "UNMOD") %>% 
+    mutate(group = gsub("group", "", term)) %>% 
+    filter(!grepl("batch", term)) %>% 
+    select(-term, -statistic, -p.value) %>% 
+    unite(protsite, uniprot_iso, site_str, sep = "-")
 
 
 # Export profile plots ----------------------------------------------------
 # Profile plots of site data
 prot_fullpep <- sort(unique(df_site$uniprot_iso))
-runlvl_bat <- df_site %>% distinct(biorep, run) %>% arrange(biorep, run) %>% .$run
+runlvl_bat <- df_site %>% distinct(batch, run) %>% arrange(batch, run) %>% .$run
 
 pdf("profile_site.pdf", width = 8, height = 6)
 for (i in seq_along(prot_fullpep)) {
@@ -206,51 +265,23 @@ for (i in seq_along(prot_fullpep)) {
 dev.off()
 
 
+df_site_aft <- nested_site %>% 
+    unnest(aftdata) %>% 
+    mutate(is_mod = site_str != "UNMOD")
+
+df_site_aft <- df_site %>% 
+    distinct(group, batch, run) %>% 
+    right_join(df_site_aft)
+
+df_site_aft <- df_site %>% 
+    distinct(uniprot_iso, site_str, feature, peptide, peptide_unmod) %>% 
+    right_join(df_site_aft)
+
 pdf("profile_site_aft.pdf", width = 8, height = 6)
 for (i in seq_along(prot_fullpep)) {
     print(plot_sprofile_aft(df_site_aft, prot_fullpep[i], runlvl_bat))
 }
 dev.off()
-
-
-# Site-level summarization ------------------------------------------------
-prot_fullpep <- unique(df_site$uniprot_iso)
-df_sumsite <- sum_siteftr_bch(df_site, prot_fullpep)  # per batch
-
-
-# Site-level modeling -----------------------------------------------------
-# Currently with no adjustment by protein abundance
-df_sumsite <- df_sumsite %>% 
-    filter(site_str != "UNMOD") %>% 
-    # mutate(is_mod = (site_str != "UNMOD")) %>% 
-    separate(run, into = c("group", "biotech"), sep = "-", remove = F) %>% 
-    mutate(batch = ifelse(grepl("B1", biotech), "B1", "B2")) %>% 
-    unite(protsite, uniprot_iso, site_str, sep = "-")
-
-# One model per batch
-nested_perbch <- df_sumsite %>% 
-    group_by(protsite, batch) %>%
-    nest() %>% 
-    mutate(fit = map(data, ~ lm(log2inty_tmp ~ 0 + group, data = .))) %>% 
-    mutate(param = map(fit, tidy), df_res = map_dbl(fit, df.residual))
-
-param_perbch <- nested_perbch %>% 
-    unnest(param) %>% 
-    mutate(group = gsub("group", "", term)) %>% 
-    select(-term, -statistic, -p.value)
-
-# One model for all batches
-nested_allbch <- df_sumsite %>% 
-    group_by(protsite) %>%
-    nest() %>% 
-    mutate(fit = map(data, ~ lm(log2inty_tmp ~ 0 + group + batch, data = .))) %>% 
-    mutate(param = map(fit, tidy), df_res = map_dbl(fit, df.residual))
-
-param_allbch <- nested_allbch %>% 
-    unnest(param) %>% 
-    mutate(group = gsub("group", "", term)) %>% 
-    filter(!grepl("batch", term)) %>% 
-    select(-term, -statistic, -p.value)
 
 
 # Site-level differential analysis ----------------------------------------
@@ -268,7 +299,8 @@ for (i in seq_along(cases)) {
     diff_perbch <- param_perbch %>% 
         filter(group %in% c(grp_ctrl, grp_case)) %>% 
         mutate(key_grp = ifelse(group == grp_ctrl, "G0", "G1")) %>% 
-        complete(protsite, batch, key_grp, df_res) %>% 
+        # complete(protsite, batch, key_grp, df_res) %>% 
+        complete(protsite, batch, key_grp) %>% 
         group_by(protsite, batch, df_res) %>% 
         summarise(log2fc = diff(estimate), se2 = sum(std.error ^ 2)) %>% 
         ungroup()
@@ -276,7 +308,8 @@ for (i in seq_along(cases)) {
     diff_allbch <- param_allbch %>% 
         filter(group %in% c(grp_ctrl, grp_case)) %>% 
         mutate(key_grp = ifelse(group == grp_ctrl, "G0", "G1")) %>% 
-        complete(protsite, key_grp, df_res) %>% 
+        # complete(protsite, key_grp, df_res) %>% 
+        complete(protsite, key_grp) %>% 
         group_by(protsite, df_res) %>% 
         summarise(log2fc = diff(estimate), se2 = sum(std.error ^ 2)) %>% 
         ungroup()
