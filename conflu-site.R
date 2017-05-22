@@ -133,7 +133,7 @@ df_conflu %>%
     labs(x = "Group", y = "Number of peptides")
 
 
-# Peptide representation --------------------------------------------------
+# Site representation -----------------------------------------------------
 # Reading site data
 df_fasmod <- readRDS("output/fasmod.rds") %>% 
     rename(
@@ -184,11 +184,11 @@ nested_site <- nested_site %>%
 # AFT imputation and MP summarization
 nested_site <- nested_site %>% 
     mutate(
-        aftdata = map(data, annot_obs), 
-        aftdata = map(aftdata, fill_censored), 
         mp_sum = map(data, sumprot_tmp), 
-        mp_aftsum = map(aftdata, sumprot_tmp)
-    )
+        aftdata = map(data, annot_obs)
+    ) %>% 
+    mutate(aftdata = map(aftdata, fill_censored)) %>% 
+    mutate(mp_aftsum = map(aftdata, sumprot_tmp))
 
 
 # Fit per-batch and all-batch models --------------------------------------
@@ -201,8 +201,8 @@ df_sum_aft <- nested_site %>% unnest(mp_aftsum) %>% left_join(run2group)
 nested_perbch <- df_sum %>% 
     group_by(uniprot_iso, site_str, batch) %>% 
     nest() %>% 
+    mutate(lm_fit = map(data, ~ lm(log2inty ~ 0 + group, data = .))) %>% 
     mutate(
-        lm_fit = map(data, ~ lm(log2inty ~ 0 + group, data = .)), 
         param = map(lm_fit, tidy), 
         df_res = map_dbl(lm_fit, df.residual)
     )
@@ -210,8 +210,8 @@ nested_perbch <- df_sum %>%
 nested_perbch_aft <- df_sum_aft %>% 
     group_by(uniprot_iso, site_str, batch) %>% 
     nest() %>% 
+    mutate(lm_fit = map(data, ~ lm(log2inty ~ 0 + group, data = .))) %>% 
     mutate(
-        lm_fit = map(data, ~ lm(log2inty ~ 0 + group, data = .)), 
         param = map(lm_fit, tidy), 
         df_res = map_dbl(lm_fit, df.residual)
     )
@@ -220,8 +220,8 @@ nested_perbch_aft <- df_sum_aft %>%
 nested_allbch <- df_sum %>% 
     group_by(uniprot_iso, site_str) %>% 
     nest() %>% 
+    mutate(lm_fit = map(data, ~ lm(log2inty ~ 0 + group + batch, data = .))) %>% 
     mutate(
-        lm_fit = map(data, ~ lm(log2inty ~ 0 + group + batch, data = .)), 
         param = map(lm_fit, tidy), 
         df_res = map_dbl(lm_fit, df.residual)
     )
@@ -229,8 +229,8 @@ nested_allbch <- df_sum %>%
 nested_allbch_aft <- df_sum_aft %>% 
     group_by(uniprot_iso, site_str) %>% 
     nest() %>% 
+    mutate(lm_fit = map(data, ~ lm(log2inty ~ 0 + group + batch, data = .))) %>% 
     mutate(
-        lm_fit = map(data, ~ lm(log2inty ~ 0 + group + batch, data = .)), 
         param = map(lm_fit, tidy), 
         df_res = map_dbl(lm_fit, df.residual)
     )
@@ -240,15 +240,14 @@ nested_allbch_aft <- df_sum_aft %>%
 param_perbch <- nested_perbch_aft %>% 
     unnest(param) %>% 
     filter(site_str != "UNMOD") %>% 
-    mutate(group = gsub("group", "", term)) %>% 
+    mutate(group = str_replace(term, "group", "")) %>% 
     select(-term, -statistic, -p.value) %>% 
     unite(protsite, uniprot_iso, site_str, sep = "-")
 
 param_allbch <- nested_allbch_aft %>% 
     unnest(param) %>% 
-    filter(site_str != "UNMOD") %>% 
-    mutate(group = gsub("group", "", term)) %>% 
-    filter(!grepl("batch", term)) %>% 
+    filter(site_str != "UNMOD", !str_detect(term, "batch")) %>% 
+    mutate(group = str_replace(term, "group", "")) %>% 
     select(-term, -statistic, -p.value) %>% 
     unite(protsite, uniprot_iso, site_str, sep = "-")
 
@@ -362,11 +361,10 @@ test_all %>% ggplot(aes(hyp, -log10(p_adj))) +
     facet_wrap(~ ctrx)
 
 
-
 # Significant site changes ------------------------------------------------
 # test_all %>% filter(p_adj < 0.05)
 # test_sig %>% group_by(ctrx, hyp) %>% count()
 
 test_sig <- test_all %>% filter(p_adj < 0.05) %>% 
-    separate(protsite, into = c("uniprot_iso", "site_str"), sep = "-", remove = FALSE) 
+    separate(protsite, into = c("uniprot_iso", "site_str"), sep = "-", remove = FALSE)
 
