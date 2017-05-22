@@ -236,20 +236,37 @@ nested_allbch_aft <- df_sum_aft %>%
     )
 
 
-# Reshape parameters ------------------------------------------------------
-param_perbch <- nested_perbch_aft %>% 
-    unnest(param) %>% 
+# Extract estimated parameters --------------------------------------------
+site_perbch <- nested_perbch_aft %>% 
     filter(site_str != "UNMOD") %>% 
-    mutate(group = str_replace(term, "group", "")) %>% 
-    select(-term, -statistic, -p.value) %>% 
-    unite(protsite, uniprot_iso, site_str, sep = "-")
-
-param_allbch <- nested_allbch_aft %>% 
     unnest(param) %>% 
-    filter(site_str != "UNMOD", !str_detect(term, "batch")) %>% 
     mutate(group = str_replace(term, "group", "")) %>% 
-    select(-term, -statistic, -p.value) %>% 
-    unite(protsite, uniprot_iso, site_str, sep = "-")
+    select(-term, -statistic, -p.value)
+
+site_allbch <- nested_allbch_aft %>% 
+    filter(site_str != "UNMOD") %>% 
+    unnest(param) %>% 
+    filter(!str_detect(term, "batch")) %>% 
+    mutate(group = str_replace(term, "group", "")) %>% 
+    select(-term, -statistic, -p.value)
+
+unmod_perbch <- nested_perbch_aft %>% 
+    filter(site_str == "UNMOD") %>% 
+    unnest(param) %>% 
+    mutate(group = str_replace(term, "group", "")) %>% 
+    select(-site_str, -term, -statistic, -p.value) %>% 
+    rename(df_unmod = df_res, est_unmod = estimate, se_unmod = std.error)
+    
+unmod_allbch <- nested_allbch_aft %>% 
+    filter(site_str == "UNMOD") %>% 
+    unnest(param) %>% 
+    filter(!str_detect(term, "batch")) %>% 
+    mutate(group = str_replace(term, "group", "")) %>% 
+    select(-site_str, -term, -statistic, -p.value) %>% 
+    rename(df_unmod = df_res, est_unmod = estimate, se_unmod = std.error)
+
+param_perbch <- site_perbch %>% left_join(unmod_perbch) %>% unite(protsite, uniprot_iso, site_str, sep = "-")
+param_allbch <- site_allbch %>% left_join(unmod_allbch) %>% unite(protsite, uniprot_iso, site_str, sep = "-")
 
 
 # Export profile plots ----------------------------------------------------
@@ -288,9 +305,9 @@ cases = c("CCCP_Satur", "DMSO_Light", "DMSO_Satur")
 controls = c("CCCP_Light", "CCCP_Light", "DMSO_Light")
 
 test_null1 <- vector("list", length = length(cases))
-# test_null2 <- vector("list", length = length(cases))
+test_null2 <- vector("list", length = length(cases))
 test_null3 <- vector("list", length = length(cases))
-# test_null4 <- vector("list", length = length(cases))
+test_null4 <- vector("list", length = length(cases))
 for (i in seq_along(cases)) {
     grp_ctrl <- controls[i]
     grp_case <- cases[i]
@@ -298,37 +315,57 @@ for (i in seq_along(cases)) {
     diff_perbch <- param_perbch %>% 
         filter(group %in% c(grp_ctrl, grp_case)) %>% 
         mutate(key_grp = ifelse(group == grp_ctrl, "G0", "G1")) %>% 
-        # complete(protsite, batch, key_grp, df_res) %>% 
         complete(protsite, batch, key_grp) %>% 
-        group_by(protsite, batch, df_res) %>% 
-        summarise(log2fc = diff(estimate), se2 = sum(std.error ^ 2)) %>% 
+        group_by(protsite, batch, df_res, df_unmod) %>% 
+        summarise(
+            log2fc = diff(estimate), se2 = sum(std.error ^ 2), 
+            log2fc_unmod = diff(est_unmod), se2_unmod = sum(se_unmod ^ 2)
+        ) %>% 
         ungroup()
     # All-batch model
     diff_allbch <- param_allbch %>% 
         filter(group %in% c(grp_ctrl, grp_case)) %>% 
         mutate(key_grp = ifelse(group == grp_ctrl, "G0", "G1")) %>% 
-        # complete(protsite, key_grp, df_res) %>% 
         complete(protsite, key_grp) %>% 
-        group_by(protsite, df_res) %>% 
-        summarise(log2fc = diff(estimate), se2 = sum(std.error ^ 2)) %>% 
+        group_by(protsite, df_res, df_unmod) %>% 
+        summarise(
+            log2fc = diff(estimate), se2 = sum(std.error ^ 2), 
+            log2fc_unmod = diff(est_unmod), se2_unmod = sum(se_unmod ^ 2)
+        ) %>% 
         ungroup()
     # H^1
     test_null1[[i]] <- diff_perbch %>% 
         group_by(protsite) %>% 
-        mutate(wt_bch = 1 / n(), wse2 = wt_bch ^ 2 * se2) %>% 
-        summarise(logFC = mean(log2fc), SE = sqrt(sum(wse2)), 
-                  DF = sum(wse2) ^ 2 / sum(wse2 ^ 2 / df_res), 
+        summarise(logFC = mean(log2fc), SE = sqrt(sum(se2)) / n(), 
+                  DF = sum(se2) ^ 2 / sum(se2 ^ 2 / df_res), 
                   t_stat = logFC / SE, p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)) %>% 
         mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs "), hyp = "null1")
-    # H^3 (grouped summary representation is kept for readability)
-    test_null3[[i]] <- diff_allbch %>% 
+    # H^2
+    test_null2[[i]] <- diff_perbch %>% 
         group_by(protsite) %>% 
-        summarise(logFC = log2fc, SE = sqrt(se2), DF = df_res, 
-                  t_stat = logFC / SE, p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)) %>% 
+        summarise(
+            logFC = mean(log2fc) - mean(log2fc_unmod), 
+            SE = sqrt(sum(se2) + sum(se2_unmod)) / n(), 
+            DF = (sum(se2) + sum(se2_unmod)) ^ 2 / sum(se2 ^ 2 / df_res + se2_unmod ^ 2 / df_unmod), 
+            t_stat = logFC / SE, p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)
+        ) %>% 
+        mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs "), hyp = "null2")
+    # H^3
+    test_null3[[i]] <- diff_allbch %>% 
+        mutate(logFC = log2fc, SE = sqrt(se2), DF = df_res, 
+               t_stat = logFC / SE, p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)) %>% 
+        select(protsite, logFC, SE, DF, t_stat, p_val) %>% 
         mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs "), hyp = "null3")
+    # H^4
+    test_null4[[i]] <- diff_allbch %>% 
+        mutate(logFC = log2fc - log2fc_unmod, SE = sqrt(se2 + se2_unmod), 
+               DF = (se2 + se2_unmod) ^ 2 / (se2 ^ 2 / df_res + se2_unmod ^ 2 / df_unmod), 
+               t_stat = logFC / SE, p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)) %>% 
+        select(protsite, logFC, SE, DF, t_stat, p_val) %>% 
+        mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs "), hyp = "null4")
 }
 
-test_all <- bind_rows(test_null1, test_null3) %>% 
+test_all <- bind_rows(test_null1, test_null2, test_null3, test_null4) %>% 
     group_by(hyp) %>% 
     mutate(p_adj = p.adjust(p_val, method = "BH")) %>% 
     ungroup()
@@ -340,7 +377,11 @@ test_all %>% ggplot(aes(hyp, t_stat)) +
     geom_boxplot() + geom_point() + 
     facet_wrap(~ ctrx)
 
-test_all %>% ggplot(aes(t_stat, colour = hyp)) + 
+test_all %>% ggplot(aes(t_stat, color = hyp)) + 
+    geom_density() + 
+    facet_wrap(~ ctrx)
+
+test_all %>% ggplot(aes(logFC, color = hyp)) + 
     geom_density() + 
     facet_wrap(~ ctrx)
 
@@ -352,19 +393,15 @@ test_all %>% ggplot(aes(hyp, DF)) +
 # Adjusted p-value
 test_all %>% ggplot(aes(hyp, -log10(p_adj))) + 
     geom_boxplot() + geom_jitter() + 
-    geom_hline(yintercept = -log10(0.05), colour = "darkred") + 
+    geom_hline(yintercept = -log10(0.05), color = "darkred") + 
     facet_wrap(~ ctrx)
 
-test_all %>% ggplot(aes(hyp, -log10(p_adj))) + 
-    geom_boxplot() + geom_point() + 
-    geom_hline(yintercept = -log10(0.05), colour = "darkred") + 
-    facet_wrap(~ ctrx)
 
 
 # Significant site changes ------------------------------------------------
-# test_all %>% filter(p_adj < 0.05)
-# test_sig %>% group_by(ctrx, hyp) %>% count()
-
 test_sig <- test_all %>% filter(p_adj < 0.05) %>% 
     separate(protsite, into = c("uniprot_iso", "site_str"), sep = "-", remove = FALSE)
+
+# test_all %>% filter(p_adj < 0.05)
+# test_sig %>% group_by(ctrx, hyp) %>% count()
 
