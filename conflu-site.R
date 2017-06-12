@@ -62,6 +62,7 @@ df_pep <- df_conflu %>%
 df_pep <- df_pep %>% filter(nb_aa >= 6)
 
 # Determine the pairing status of peptide
+# [TODO]: postpone this step after filtering
 df_pep <- df_pep %>% group_by(peptide_unmod) %>% 
     mutate(is_paired = ifelse(n_distinct(is_mod) == 2, TRUE, FALSE)) %>% 
     ungroup()
@@ -131,6 +132,30 @@ df_conflu %>%
     ggplot(aes(group, nb_peptide)) + 
     geom_jitter(aes(colour = batch, shape = mod), width = 0.1, size = 4) + 
     labs(x = "Group", y = "Number of peptides")
+
+
+# Within-batch normalization ----------------------------------------------
+# Based on unpaired unmodified peptides
+med_conflu <- df_conflu %>% 
+    filter(!is_paired, !is_mod) %>% 
+    group_by(batch, run) %>% 
+    summarise(log2inty_med = median(log2inty, na.rm = TRUE)) %>% 
+    mutate(log2inty_bch = median(log2inty_med)) %>% 
+    ungroup()
+
+df_conflu <- df_conflu %>% 
+    left_join(med_conflu) %>% 
+    mutate(log2inty = log2inty - log2inty_med + log2inty_bch)
+
+# QC plot (boxplot)
+df_conflu %>% 
+    filter(!is_paired) %>% 
+    mutate(is_mod_fac = factor(ifelse(is_mod, "Modified", "Unmodified"))) %>% 
+    ggplot(aes(run, log2inty)) + 
+    geom_boxplot(aes(fill = batch)) + 
+    facet_wrap(~ is_mod_fac) + 
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+    labs(x = "Run", y = "Log2-intensity", title = "Unpaired features")
 
 
 # Site representation -----------------------------------------------------
@@ -370,6 +395,12 @@ test_all <- bind_rows(test_null1, test_null2, test_null3, test_null4) %>%
     mutate(p_adj = p.adjust(p_val, method = "BH")) %>% 
     ungroup()
 
+test_all <- test_all %>% 
+    mutate(
+        model = ifelse(hyp %in% c("null1", "null2"), "per-batch", "all-batch"), 
+        protadj = hyp %in% c("null2", "null4")
+    )
+
 
 # Site-level results ------------------------------------------------------
 # t-statistic
@@ -385,10 +416,26 @@ test_all %>% ggplot(aes(logFC, color = hyp)) +
     geom_density() + 
     facet_wrap(~ ctrx)
 
+test_all %>% ggplot(aes(model, t_stat, fill = protadj)) + 
+    geom_boxplot() + 
+    geom_hline(yintercept = 0, color = "darkred") + 
+    facet_wrap(~ ctrx)
+
+test_all %>% ggplot(aes(model, SE, fill = protadj)) + 
+    geom_boxplot() + 
+    geom_hline(yintercept = 0) + 
+    facet_wrap(~ ctrx)
+
+
 # Degrees of freedom
 test_all %>% ggplot(aes(hyp, DF)) + 
     geom_boxplot() + geom_jitter() + 
     facet_wrap(~ ctrx)
+
+test_all %>% ggplot(aes(model, DF, fill = protadj)) + 
+    geom_boxplot() + geom_jitter(alpha = 0.25) + 
+    facet_wrap(~ ctrx)
+
 
 # Adjusted p-value
 test_all %>% ggplot(aes(hyp, -log10(p_adj))) + 
@@ -396,6 +443,16 @@ test_all %>% ggplot(aes(hyp, -log10(p_adj))) +
     geom_hline(yintercept = -log10(0.05), color = "darkred") + 
     facet_wrap(~ ctrx)
 
+test_all %>% ggplot(aes(model, -log10(p_adj), fill = protadj)) + 
+    geom_boxplot() + geom_jitter(alpha = 0.25) + 
+    geom_hline(yintercept = -log10(0.05), color = "darkred") + 
+    facet_wrap(~ ctrx)
+
+# Volcano plot
+test_all %>% ggplot(aes(logFC, -log10(p_adj))) + 
+    geom_point() + 
+    geom_hline(yintercept = -log10(0.05), color = "darkred") + 
+    facet_grid(protadj ~ model)
 
 
 # Significant site changes ------------------------------------------------
@@ -404,4 +461,3 @@ test_sig <- test_all %>% filter(p_adj < 0.05) %>%
 
 # test_all %>% filter(p_adj < 0.05)
 # test_sig %>% group_by(ctrx, hyp) %>% count()
-
