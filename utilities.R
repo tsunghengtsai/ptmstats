@@ -11,17 +11,17 @@ annot_obs <- function(data) {
 
 # Fill censored values with AFT
 fill_censored <- function(aftdata) {
-    if (n_distinct(aftdata$feature) == 1) return(aftdata)  # only one feature
-    if (all(aftdata$ind_obs == 1)) return(aftdata)  # no missing value
+    if (n_distinct(aftdata$feature) == 1) return(aftdata %>% select(-log2inty_aft))  # only one feature
+    if (all(aftdata$ind_obs == 1)) return(aftdata %>% select(-log2inty_aft))  # no missing value
     # AFT model with effects of run and feature
     fit <- survreg(Surv(log2inty_aft, ind_obs, type = "left") ~ run + feature,
                    data = aftdata, dist = "gaussian")
     aftdata <- aftdata %>% 
         mutate(
             log2inty_pred = predict(fit), 
-            log2inty_aft = ifelse(ind_obs == 0, log2inty_pred, log2inty_aft)
+            log2inty = ifelse(ind_obs == 0, log2inty_pred, log2inty_aft)
         ) %>% 
-        select(-log2inty_pred)
+        select(-log2inty_aft, -log2inty_pred)
     
     return(aftdata)
 }
@@ -127,7 +127,7 @@ plot_sprofile_aft <- function(df_allprot, protein, run_level) {
     # Complete possible combinations of peptide features and runs
     mpar <- df_prot %>% distinct(site_str, feature, is_mod)
     df_fill <- df_prot %>% 
-        select(feature, run, ind_obs, log2inty_aft) %>% 
+        select(feature, run, ind_obs, log2inty) %>% 
         complete(run = run_level, feature) %>% 
         left_join(mpar) %>% 
         mutate(
@@ -138,20 +138,61 @@ plot_sprofile_aft <- function(df_allprot, protein, run_level) {
     # Feature profiles categorized by modification
     df_fill_mod <- filter(df_fill, is_mod)
     df_fill_unmod <- filter(df_fill, !is_mod)
-    ggplot(df_fill_mod, aes(run_fac, log2inty_aft, group = feature, color = site_str, alpha = ind_obs)) + 
+    ggplot(df_fill_mod, aes(run_fac, log2inty, group = feature, color = site_str, alpha = ind_obs)) + 
         geom_point(size = 2) +
         geom_line() + 
-        geom_point(data = df_fill_unmod, aes(run_fac, log2inty_aft, alpha = ind_obs), color = "gray", size = 2) + 
-        geom_line(data = df_fill_unmod, aes(run_fac, log2inty_aft, group = feature), color = "gray") + 
+        geom_point(data = df_fill_unmod, aes(run_fac, log2inty, alpha = ind_obs), color = "gray", size = 2) + 
+        geom_line(data = df_fill_unmod, aes(run_fac, log2inty, group = feature), color = "gray") + 
         geom_vline(xintercept = 8.5) + 
         scale_alpha_manual(values = c("0" = 0.4, "1" = 0.9), guide = FALSE) + 
         facet_grid(is_mod_fac ~ .) + 
-        coord_cartesian(ylim = c(10, 35)) + 
+        coord_cartesian(ylim = c(5, 35)) + 
         labs(x = "Run", y = "Log2-intensity", title = protein) + 
         theme_bw() + 
         guides(color = guide_legend(nrow = 1, title = NULL)) + 
         theme(legend.position = c(0.5, 0.065)) + 
+        # theme(axis.text.x = element_text(angle = 90, hjust = 1))
         theme(axis.text.x = element_blank())
 }
 
+
+# Linear model with group effect 
+lm_perbch <- function(df_perbch) {
+    if (n_distinct(df_perbch$group) == 1) {
+        fit <- lm(log2inty ~ 1, data = df_perbch)
+    } else {
+        fit <- lm(log2inty ~ 0 + group, data = df_perbch)
+    }
+    
+    return(fit)
+}
+
+
+# Linear model with group effect and batch effect
+lm_allbch <- function(df_allbch) {
+    if (n_distinct(df_allbch$group) == 1) {
+        fit <- lm(log2inty ~ batch, data = df_allbch)
+    } else {
+        fit <- lm(log2inty ~ 0 + group + batch, data = df_allbch)
+    }
+    
+    return(fit)
+}
+
+
+# Extract estimate of group effect
+tidy_bch <- function(bch_fit, df_bch) {
+    params <- tidy(bch_fit) %>% filter(!str_detect(term, "batch"))
+    if (n_distinct(df_bch$group) == 1) {
+        params <- params %>% 
+            mutate(group = unique(df_bch$group)) %>% 
+            select(-term, -statistic, -p.value)
+    } else {
+        params <- params %>% 
+            mutate(group = str_replace(term, "group", "")) %>% 
+            select(-term, -statistic, -p.value)
+    }
+    
+    return(params)
+}
 
