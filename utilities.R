@@ -170,6 +170,9 @@ lm_perbch <- function(df_perbch) {
 
 # Linear model with group effect and batch effect
 lm_allbch <- function(df_allbch) {
+    if (n_distinct(df_allbch$batch) == 1) 
+        stop("Cannot infer batch effect with a single batch!")
+    
     if (n_distinct(df_allbch$group) == 1) {
         fit <- lm(log2inty ~ batch, data = df_allbch)
     } else {
