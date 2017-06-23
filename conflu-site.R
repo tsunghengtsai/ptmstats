@@ -237,10 +237,15 @@ nested_perbch_aft <- df_sum_aft %>%
     )
 
 
-# One model for all batches
+# One model for all batches (need data from >1 batch)
 nested_allbch_aft <- df_sum_aft %>% 
     group_by(uniprot_iso, site_str) %>% 
     nest() %>% 
+    mutate(nb_bch = map_int(data, ~ n_distinct(.$batch))) %>% 
+    filter(nb_bch > 1) %>% 
+    select(-nb_bch)
+
+nested_allbch_aft <- nested_allbch_aft %>% 
     mutate(lm_fit = map(data, lm_allbch)) %>% 
     mutate(
         param = map2(lm_fit, data, tidy_bch), 
