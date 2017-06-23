@@ -63,6 +63,7 @@ df_pep <- df_pep %>% filter(nb_aa >= 6)
 
 # Determine the pairing status of peptide
 # [TODO]: postpone this step after filtering
+# [TODO]: determine the pairing status with "site"
 df_pep <- df_pep %>% group_by(peptide_unmod) %>% 
     mutate(is_paired = ifelse(n_distinct(is_mod) == 2, TRUE, FALSE)) %>% 
     ungroup()
@@ -97,7 +98,7 @@ df_conflu <- df_conflu %>%
 
 # Remove singleton features
 df_conflu <- df_conflu %>%
-    group_by(uniprot_iso, feature) %>%
+    group_by(uniprot_iso, feature, batch) %>%
     filter(n() != 1) %>% ungroup()
 
 # Remove non-valid features without sufficient coverage (50%)
