@@ -176,33 +176,43 @@ df_fasmod01 <- df_fasmod %>%
 
 df_conflu <- df_conflu %>% inner_join(df_fasmod01)
 
+
+# Potential filtering step ------------------------------------------------
+
 # Focus on conditions with measurements (for a site) in both batches
-site_xbch <- df_conflu %>% 
-    filter(!is_paired, is_mod) %>% 
-    group_by(uniprot_iso, site_str, group) %>% 
-    summarise(nb_run = n_distinct(run)) %>% 
-    ungroup() %>% 
+site_xbch <- df_conflu %>%
+    filter(!is_paired, is_mod) %>%
+    group_by(uniprot_iso, site_str, group) %>%
+    summarise(nb_run = n_distinct(run)) %>%
+    ungroup() %>%
     filter(nb_run == 4)
 
-unmod_xbch <- df_conflu %>% 
-    filter(!is_paired, !is_mod) %>% 
-    group_by(uniprot_iso, group) %>% 
-    summarise(nb_run = n_distinct(run)) %>% 
-    ungroup() %>% 
+unmod_xbch <- df_conflu %>%
+    filter(!is_paired, !is_mod) %>%
+    group_by(uniprot_iso, group) %>%
+    summarise(nb_run = n_distinct(run)) %>%
+    ungroup() %>%
     filter(nb_run == 4)
 
 # Keeping only the modified peptides (with unpaired unmodified peptides)
 df_site <- df_conflu %>% semi_join(unmod_xbch) %>% semi_join(site_xbch)
 
 # Adding back the unmodified peptides
-df_site <- df_conflu %>% 
-    filter(!is_paired, !is_mod) %>% 
-    semi_join(df_site %>% distinct(uniprot_iso, group)) %>% 
+df_site <- df_conflu %>%
+    filter(!is_paired, !is_mod) %>%
+    semi_join(df_site %>% distinct(uniprot_iso, group)) %>%
     bind_rows(df_site)
+
+nested_site <- df_site %>%
+    select(uniprot_iso, site_str, feature, batch, run, log2inty) %>%
+    group_by(uniprot_iso, site_str, batch) %>%
+    nest()
 
 
 # Imputation and summarization --------------------------------------------
-nested_site <- df_site %>% 
+
+nested_site <- df_conflu %>% 
+    filter(!is_paired) %>% 
     select(uniprot_iso, site_str, feature, batch, run, log2inty) %>% 
     group_by(uniprot_iso, site_str, batch) %>% 
     nest()
@@ -222,8 +232,8 @@ nested_site <- nested_site %>%
 
 # Fit per-batch and all-batch models --------------------------------------
 # Add group information
-run2group <- df_site %>% distinct(run, group)
-df_sum <- nested_site %>% unnest(mp_sum) %>% left_join(run2group)
+run2group <- df_conflu %>% distinct(run, group)
+# df_sum <- nested_site %>% unnest(mp_sum) %>% left_join(run2group)
 df_sum_aft <- nested_site %>% unnest(mp_aftsum) %>% left_join(run2group)
 
 # One model per batch
@@ -235,7 +245,6 @@ nested_perbch_aft <- df_sum_aft %>%
         param = map2(lm_fit, data, tidy_bch), 
         df_res = map_dbl(lm_fit, df.residual)
     )
-
 
 # One model for all batches (need data from >1 batch)
 nested_allbch_aft <- df_sum_aft %>% 
@@ -276,6 +285,14 @@ unmod_allbch <- nested_allbch_aft %>%
 
 param_perbch <- site_perbch %>% left_join(unmod_perbch) %>% unite(protsite, uniprot_iso, site_str, sep = "-")
 param_allbch <- site_allbch %>% left_join(unmod_allbch) %>% unite(protsite, uniprot_iso, site_str, sep = "-")
+
+# Keep parameters with std error for across-batch inference
+param_perbch <- param_perbch %>% 
+    filter(!is.na(std.error)) %>% 
+    group_by(protsite, group) %>% 
+    filter(n() == 2) %>% 
+    ungroup()
+param_allbch <- param_allbch %>% filter(!is.na(std.error))
 
 
 # Export profile plots ----------------------------------------------------
@@ -325,21 +342,30 @@ for (i in seq_along(cases)) {
         filter(group %in% c(grp_ctrl, grp_case)) %>% 
         mutate(key_grp = ifelse(group == grp_ctrl, "G0", "G1")) %>% 
         complete(protsite, batch, key_grp)
-    diff_perbch <- full_perbch %>% 
-        group_by(protsite, batch) %>% 
-        filter(!any(is.na(df_res))) %>% 
-        group_by(protsite, batch, df_res, df_unmod) %>% 
+    diff_perbch <- full_perbch %>%
+        group_by(protsite, batch) %>%
+        filter(!any(is.na(df_res))) %>%
+        group_by(protsite, batch, df_res) %>%
+        summarise(log2fc = diff(estimate), se2 = sum(std.error ^ 2)) %>% 
+        ungroup()
+    diff_perbch2 <- full_perbch %>%
+        group_by(protsite, batch) %>%
+        filter(!any(is.na(df_res))) %>%
+        filter(!any(is.na(df_unmod))) %>% 
+        group_by(protsite, batch, df_res, df_unmod) %>%
         summarise(
-            log2fc = diff(estimate), se2 = sum(std.error ^ 2), 
+            log2fc = diff(estimate), se2 = sum(std.error ^ 2),
             log2fc_unmod = diff(est_unmod), se2_unmod = sum(se_unmod ^ 2)
         ) %>% ungroup()
     part_perbch <- full_perbch %>% anti_join(diff_perbch)
-    untest_perbch <- part_perbch %>% 
-        filter(!is.na(df_res)) %>% 
-        distinct(protsite, key_grp) %>% 
+    untest_perbch <- part_perbch %>%
+        filter(!is.na(df_res)) %>%
+        group_by(protsite, key_grp) %>% 
+        summarise(is_adj = all(!is.na(se_unmod))) %>% 
+        ungroup() %>% 
         mutate(
-            logFC = ifelse(key_grp == "G1", Inf, -Inf), 
-            SE = NA, DF = NA, t_stat = NA, p_val = NA, 
+            logFC = ifelse(key_grp == "G1", Inf, -Inf),
+            SE = NA, DF = NA, t_stat = NA, p_val = NA,
             ctrx = paste(grp_case, grp_ctrl, sep = " vs ")
         ) %>% select(-key_grp)
     # All-batch model
@@ -350,6 +376,13 @@ for (i in seq_along(cases)) {
     diff_allbch <- full_allbch %>% 
         group_by(protsite) %>% 
         filter(!any(is.na(df_res))) %>% 
+        group_by(protsite, df_res) %>% 
+        summarise(log2fc = diff(estimate), se2 = sum(std.error ^ 2)) %>% 
+        ungroup()
+    diff_allbch2 <- full_allbch %>% 
+        group_by(protsite) %>% 
+        filter(!any(is.na(df_res))) %>% 
+        filter(!any(is.na(df_unmod))) %>% 
         group_by(protsite, df_res, df_unmod) %>% 
         summarise(
             log2fc = diff(estimate), se2 = sum(std.error ^ 2), 
@@ -358,7 +391,8 @@ for (i in seq_along(cases)) {
     part_allbch <- full_allbch %>% anti_join(diff_allbch)
     untest_allbch <- part_allbch %>% 
         filter(!is.na(df_res)) %>% 
-        distinct(protsite, key_grp) %>% 
+        mutate(is_adj = !is.na(se_unmod)) %>% 
+        distinct(protsite, key_grp, is_adj) %>% 
         mutate(
             logFC = ifelse(key_grp == "G1", Inf, -Inf), 
             SE = NA, DF = NA, t_stat = NA, p_val = NA, 
@@ -371,9 +405,9 @@ for (i in seq_along(cases)) {
                   DF = sum(se2) ^ 2 / sum(se2 ^ 2 / df_res), 
                   t_stat = logFC / SE, p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)) %>% 
         mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs "), hyp = "null1") %>% 
-        bind_rows(untest_perbch %>% mutate(hyp = "null1"))
+        bind_rows(untest_perbch %>% select(-is_adj) %>% mutate(hyp = "null1"))
     # H^2
-    test_null2[[i]] <- diff_perbch %>% 
+    test_null2[[i]] <- diff_perbch2 %>% 
         group_by(protsite) %>% 
         summarise(
             logFC = mean(log2fc) - mean(log2fc_unmod), 
@@ -382,22 +416,22 @@ for (i in seq_along(cases)) {
             t_stat = logFC / SE, p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)
         ) %>% 
         mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs "), hyp = "null2") %>% 
-        bind_rows(untest_perbch %>% mutate(hyp = "null2"))
+        bind_rows(untest_perbch %>% filter(is_adj) %>% select(-is_adj) %>% mutate(hyp = "null2"))
     # H^3
     test_null3[[i]] <- diff_allbch %>% 
         mutate(logFC = log2fc, SE = sqrt(se2), DF = df_res, 
                t_stat = logFC / SE, p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)) %>% 
         select(protsite, logFC, SE, DF, t_stat, p_val) %>% 
         mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs "), hyp = "null3") %>% 
-        bind_rows(untest_allbch %>% mutate(hyp = "null3"))
+        bind_rows(untest_allbch %>% select(-is_adj) %>% mutate(hyp = "null3"))
     # H^4
-    test_null4[[i]] <- diff_allbch %>% 
+    test_null4[[i]] <- diff_allbch2 %>% 
         mutate(logFC = log2fc - log2fc_unmod, SE = sqrt(se2 + se2_unmod), 
                DF = (se2 + se2_unmod) ^ 2 / (se2 ^ 2 / df_res + se2_unmod ^ 2 / df_unmod), 
                t_stat = logFC / SE, p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)) %>% 
         select(protsite, logFC, SE, DF, t_stat, p_val) %>% 
         mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs "), hyp = "null4") %>% 
-        bind_rows(untest_allbch %>% mutate(hyp = "null4"))
+        bind_rows(untest_allbch %>% filter(is_adj) %>% select(-is_adj) %>% mutate(hyp = "null4"))
 }
 
 test_all <- bind_rows(test_null1, test_null2, test_null3, test_null4) %>% 
