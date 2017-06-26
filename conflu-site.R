@@ -338,100 +338,11 @@ for (i in seq_along(cases)) {
     grp_ctrl <- controls[i]
     grp_case <- cases[i]
     # Per-batch model
-    full_perbch <- param_perbch %>% 
-        filter(group %in% c(grp_ctrl, grp_case)) %>% 
-        mutate(key_grp = ifelse(group == grp_ctrl, "G0", "G1")) %>% 
-        complete(protsite, batch, key_grp)
-    diff_perbch <- full_perbch %>%
-        group_by(protsite, batch) %>%
-        filter(!any(is.na(df_res))) %>%
-        group_by(protsite, batch, df_res) %>%
-        summarise(log2fc = diff(estimate), se2 = sum(std.error ^ 2)) %>% 
-        ungroup()
-    diff_perbch2 <- full_perbch %>%
-        group_by(protsite, batch) %>%
-        filter(!any(is.na(df_res))) %>%
-        filter(!any(is.na(df_unmod))) %>% 
-        group_by(protsite, batch, df_res, df_unmod) %>%
-        summarise(
-            log2fc = diff(estimate), se2 = sum(std.error ^ 2),
-            log2fc_unmod = diff(est_unmod), se2_unmod = sum(se_unmod ^ 2)
-        ) %>% ungroup()
-    part_perbch <- full_perbch %>% anti_join(diff_perbch)
-    untest_perbch <- part_perbch %>%
-        filter(!is.na(df_res)) %>%
-        group_by(protsite, key_grp) %>% 
-        summarise(is_adj = all(!is.na(se_unmod))) %>% 
-        ungroup() %>% 
-        mutate(
-            logFC = ifelse(key_grp == "G1", Inf, -Inf),
-            SE = NA, DF = NA, t_stat = NA, p_val = NA,
-            ctrx = paste(grp_case, grp_ctrl, sep = " vs ")
-        ) %>% select(-key_grp)
+    test_null1[[i]] <- test_mod_bch(param_perbch, grp_ctrl, grp_case) %>% mutate(hyp = "null1")
+    test_null2[[i]] <- test_adjmod_bch(param_perbch, grp_ctrl, grp_case) %>% mutate(hyp = "null2")
     # All-batch model
-    full_allbch <- param_allbch %>% 
-        filter(group %in% c(grp_ctrl, grp_case)) %>% 
-        mutate(key_grp = ifelse(group == grp_ctrl, "G0", "G1")) %>% 
-        complete(protsite, key_grp)
-    diff_allbch <- full_allbch %>% 
-        group_by(protsite) %>% 
-        filter(!any(is.na(df_res))) %>% 
-        group_by(protsite, df_res) %>% 
-        summarise(log2fc = diff(estimate), se2 = sum(std.error ^ 2)) %>% 
-        ungroup()
-    diff_allbch2 <- full_allbch %>% 
-        group_by(protsite) %>% 
-        filter(!any(is.na(df_res))) %>% 
-        filter(!any(is.na(df_unmod))) %>% 
-        group_by(protsite, df_res, df_unmod) %>% 
-        summarise(
-            log2fc = diff(estimate), se2 = sum(std.error ^ 2), 
-            log2fc_unmod = diff(est_unmod), se2_unmod = sum(se_unmod ^ 2)
-        ) %>% ungroup()
-    part_allbch <- full_allbch %>% anti_join(diff_allbch)
-    untest_allbch <- part_allbch %>% 
-        filter(!is.na(df_res)) %>% 
-        mutate(is_adj = !is.na(se_unmod)) %>% 
-        distinct(protsite, key_grp, is_adj) %>% 
-        mutate(
-            logFC = ifelse(key_grp == "G1", Inf, -Inf), 
-            SE = NA, DF = NA, t_stat = NA, p_val = NA, 
-            ctrx = paste(grp_case, grp_ctrl, sep = " vs ")
-        ) %>% select(-key_grp)
-    # H^1
-    test_null1[[i]] <- diff_perbch %>% 
-        group_by(protsite) %>% 
-        summarise(logFC = mean(log2fc), SE = sqrt(sum(se2)) / n(), 
-                  DF = sum(se2) ^ 2 / sum(se2 ^ 2 / df_res), 
-                  t_stat = logFC / SE, p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)) %>% 
-        mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs "), hyp = "null1") %>% 
-        bind_rows(untest_perbch %>% select(-is_adj) %>% mutate(hyp = "null1"))
-    # H^2
-    test_null2[[i]] <- diff_perbch2 %>% 
-        group_by(protsite) %>% 
-        summarise(
-            logFC = mean(log2fc) - mean(log2fc_unmod), 
-            SE = sqrt(sum(se2) + sum(se2_unmod)) / n(), 
-            DF = (sum(se2) + sum(se2_unmod)) ^ 2 / sum(se2 ^ 2 / df_res + se2_unmod ^ 2 / df_unmod), 
-            t_stat = logFC / SE, p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)
-        ) %>% 
-        mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs "), hyp = "null2") %>% 
-        bind_rows(untest_perbch %>% filter(is_adj) %>% select(-is_adj) %>% mutate(hyp = "null2"))
-    # H^3
-    test_null3[[i]] <- diff_allbch %>% 
-        mutate(logFC = log2fc, SE = sqrt(se2), DF = df_res, 
-               t_stat = logFC / SE, p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)) %>% 
-        select(protsite, logFC, SE, DF, t_stat, p_val) %>% 
-        mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs "), hyp = "null3") %>% 
-        bind_rows(untest_allbch %>% select(-is_adj) %>% mutate(hyp = "null3"))
-    # H^4
-    test_null4[[i]] <- diff_allbch2 %>% 
-        mutate(logFC = log2fc - log2fc_unmod, SE = sqrt(se2 + se2_unmod), 
-               DF = (se2 + se2_unmod) ^ 2 / (se2 ^ 2 / df_res + se2_unmod ^ 2 / df_unmod), 
-               t_stat = logFC / SE, p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)) %>% 
-        select(protsite, logFC, SE, DF, t_stat, p_val) %>% 
-        mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs "), hyp = "null4") %>% 
-        bind_rows(untest_allbch %>% filter(is_adj) %>% select(-is_adj) %>% mutate(hyp = "null4"))
+    test_null3[[i]] <- test_mod(param_allbch, grp_ctrl, grp_case) %>% mutate(hyp = "null3")
+    test_null4[[i]] <- test_adjmod(param_allbch, grp_ctrl, grp_case) %>% mutate(hyp = "null4")
 }
 
 test_all <- bind_rows(test_null1, test_null2, test_null3, test_null4) %>% 
@@ -494,7 +405,9 @@ test_all %>% ggplot(aes(model, -log10(p_adj), fill = protadj)) +
     facet_wrap(~ ctrx)
 
 # Volcano plot
-test_all %>% ggplot(aes(logFC, -log10(p_adj))) + 
+test_all %>% 
+    filter(abs(logFC) < Inf) %>% 
+    ggplot(aes(logFC, -log10(p_adj))) + 
     geom_point() + 
     geom_hline(yintercept = -log10(0.05), color = "darkred") + 
     facet_grid(protadj ~ model)
