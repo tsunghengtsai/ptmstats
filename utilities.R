@@ -19,7 +19,7 @@ fill_censored <- function(aftdata) {
     aftdata <- aftdata %>% 
         mutate(
             log2inty_pred = predict(fit), 
-            log2inty = ifelse(ind_obs == 0, log2inty_pred, log2inty_aft)
+            log2inty = ifelse(ind_obs == 0, pmin(log2inty_pred, log2inty_aft), log2inty_aft)
         ) %>% 
         select(-log2inty_aft, -log2inty_pred)
     
