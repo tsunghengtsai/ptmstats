@@ -1,13 +1,71 @@
+# Sequence annotation -----------------------------------------------------
+
+# Annotate modification site
+ant_site <- function(index, index_full, residue) {
+    if (is_empty(index)) {
+        ant_str <- "UNMOD"
+    } else {
+        ant_len <- max(str_length(index_full))
+        ant_idx <- str_pad(index, width = ant_len, pad = "0")
+        ant_str <- str_c(residue, ant_idx, collapse = "-")
+    }
+    
+    return(ant_str)
+}
+
+
+# Locate potential modification sites
+locate_site <- function(pep_seq, pep_idx, mod_res) {
+    pep_start <- unname(pep_idx[, "start"])
+    site_relidx <- str_locate_all(pep_seq, mod_res)[[1]]
+    site_relstart <- unname(site_relidx[, "start"])
+    site_idx <- site_relstart + pep_start - 1
+    
+    return(site_idx)
+}
+
+
+# Locate modified sites
+locate_mod <- function(pep_seq, pep_idx, mod_res_symbol) {
+    pep_start <- unname(pep_idx[, "start"])
+    site_relidx <- str_locate_all(pep_seq, mod_res_symbol)[[1]]
+    site_relstart <- unname(site_relidx[, "start"])
+    mod_idx <- site_relstart - seq_along(site_relstart) + pep_start
+    
+    return(mod_idx)
+}
+
+
+# Data processing & summarization -----------------------------------------
+
+# Normalization with unpaired unmodified peptides
+normalize_mod <- function(data) {
+    medians <- data %>% 
+        filter(!is_paired, !is_mod) %>% 
+        group_by(batch, run) %>% 
+        summarise(log2inty_med = median(log2inty, na.rm = TRUE)) %>% 
+        mutate(log2inty_bch = median(log2inty_med)) %>% 
+        ungroup()
+    normdata <- data %>% 
+        left_join(medians) %>% 
+        mutate(log2inty = ifelse(is.na(log2inty_med), log2inty, log2inty - log2inty_med + log2inty_bch)) %>% 
+        select(-log2inty_med, -log2inty_bch)
+    
+    return(normdata)
+}
+
+
 # Annotate observation status and add censored values
 annot_obs <- function(data) {
     augdata <- data %>% 
-        mutate(ind_obs = ifelse(is.na(log2inty), 0, 1)) %>% 
+        mutate(ind_obs = ifelse(is.na(log2inty), 0L, 1L)) %>% 
         group_by(feature) %>% 
         mutate(log2inty_aft = ifelse(ind_obs == 0, 0.99 * min(log2inty[ind_obs == 1]), log2inty)) %>% 
         ungroup()
     
     return(augdata)
 }
+
 
 # Fill censored values with AFT
 fill_censored <- function(aftdata) {
@@ -29,7 +87,6 @@ fill_censored <- function(aftdata) {
 
 # Summarization of feature intensities of a protein using Tukey's median polish
 sumprot_tmp <- function(df_prot) {
-    # Required fields of df_prot: feature, run, log2inty
     inty_wide <- df_prot %>% select(feature, run, log2inty) %>% spread(feature, log2inty)
     inty_mat <- data.matrix(inty_wide[, -1])
     mp_out <- medpolish(inty_mat, na.rm = TRUE, trace.iter = FALSE)
@@ -92,69 +149,7 @@ sum_siteftr_bch <- function(df_allprot, proteins) {
 }
 
 
-# Profile plots for site data 
-plot_sprofile <- function(df_allprot, protein, run_level) {
-    df_prot <- df_allprot %>% filter(uniprot_iso == protein) %>% filter(!is_paired)
-    # Complete possible combinations of peptide features and runs
-    mpar <- df_prot %>% distinct(site_str, feature, is_mod)
-    df_fill <- df_prot %>% 
-        select(feature, run, log2inty) %>% 
-        complete(run = run_level, feature) %>% 
-        left_join(mpar) %>% 
-        mutate(is_mod_fac = factor(ifelse(is_mod, "Modified", "Unmodified")), 
-               run_fac = factor(run, levels = run_level))
-    # Feature profiles categorized by modification and matching status
-    filter(df_fill, is_mod) %>% 
-        ggplot(aes(run_fac, log2inty, group = feature, colour = site_str)) + 
-        geom_point(size = 2, alpha = 0.5) +
-        geom_line(alpha = 0.75) + 
-        geom_line(data = filter(df_fill, !is_mod), aes(run_fac, log2inty, group = feature), colour = "gray") + 
-        geom_point(data = filter(df_fill, !is_mod), aes(run_fac, log2inty), colour = "gray", size = 2) + 
-        geom_vline(xintercept = 8.5) + 
-        facet_grid(is_mod_fac ~ .) + 
-        coord_cartesian(ylim = c(10, 35)) + 
-        labs(x = "Run", y = "Log2-intensity", title = protein) + 
-        theme_bw() + 
-        guides(colour = guide_legend(nrow = 1, title = NULL)) + 
-        theme(legend.position = c(0.5, 0.065)) + 
-        theme(axis.text.x = element_blank())
-}
-
-
-# Profile plots for site data with annotations for missing values
-plot_sprofile_aft <- function(df_allprot, protein, run_level) {
-    df_prot <- df_allprot %>% filter(uniprot_iso == protein)
-    # Complete possible combinations of peptide features and runs
-    mpar <- df_prot %>% distinct(site_str, feature, is_mod)
-    df_fill <- df_prot %>% 
-        select(feature, run, ind_obs, log2inty) %>% 
-        complete(run = run_level, feature) %>% 
-        left_join(mpar) %>% 
-        mutate(
-            is_mod_fac = factor(ifelse(is_mod, "Modified", "Unmodified")), 
-            run_fac = factor(run, levels = run_level), 
-            ind_obs = factor(ind_obs, levels = c("0", "1"))
-        )
-    # Feature profiles categorized by modification
-    df_fill_mod <- filter(df_fill, is_mod)
-    df_fill_unmod <- filter(df_fill, !is_mod)
-    ggplot(df_fill_mod, aes(run_fac, log2inty, group = feature, color = site_str, alpha = ind_obs)) + 
-        geom_point(size = 2) +
-        geom_line() + 
-        geom_point(data = df_fill_unmod, aes(run_fac, log2inty, alpha = ind_obs), color = "gray", size = 2) + 
-        geom_line(data = df_fill_unmod, aes(run_fac, log2inty, group = feature), color = "gray") + 
-        geom_vline(xintercept = 8.5) + 
-        scale_alpha_manual(values = c("0" = 0.4, "1" = 0.9), guide = FALSE) + 
-        facet_grid(is_mod_fac ~ .) + 
-        coord_cartesian(ylim = c(5, 35)) + 
-        labs(x = "Run", y = "Log2-intensity", title = protein) + 
-        theme_bw() + 
-        guides(color = guide_legend(nrow = 1, title = NULL)) + 
-        theme(legend.position = c(0.5, 0.065)) + 
-        # theme(axis.text.x = element_text(angle = 90, hjust = 1))
-        theme(axis.text.x = element_blank())
-}
-
+# Whole-plot modeling -----------------------------------------------------
 
 # Linear model with group effect 
 lm_perbch <- function(df_perbch) {
@@ -199,6 +194,8 @@ tidy_bch <- function(bch_fit, df_bch) {
     return(params)
 }
 
+
+# Differential analysis ---------------------------------------------------
 
 # Testing for differential modification
 test_mod <- function(df_mod, grp_ctrl, grp_case) {
@@ -353,3 +350,68 @@ test_adjmod_bch <- function(df_mod, grp_ctrl, grp_case) {
     return(res)
 }
 
+
+# Visualization -----------------------------------------------------------
+
+# Profile plots for site data 
+plot_sprofile <- function(df_allprot, protein, run_level) {
+    df_prot <- df_allprot %>% filter(uniprot_iso == protein) %>% filter(!is_paired)
+    # Complete possible combinations of peptide features and runs
+    mpar <- df_prot %>% distinct(site_str, feature, is_mod)
+    df_fill <- df_prot %>% 
+        select(feature, run, log2inty) %>% 
+        complete(run = run_level, feature) %>% 
+        left_join(mpar) %>% 
+        mutate(is_mod_fac = factor(ifelse(is_mod, "Modified", "Unmodified")), 
+               run_fac = factor(run, levels = run_level))
+    # Feature profiles categorized by modification and matching status
+    filter(df_fill, is_mod) %>% 
+        ggplot(aes(run_fac, log2inty, group = feature, colour = site_str)) + 
+        geom_point(size = 2, alpha = 0.5) +
+        geom_line(alpha = 0.75) + 
+        geom_line(data = filter(df_fill, !is_mod), aes(run_fac, log2inty, group = feature), colour = "gray") + 
+        geom_point(data = filter(df_fill, !is_mod), aes(run_fac, log2inty), colour = "gray", size = 2) + 
+        geom_vline(xintercept = 8.5) + 
+        facet_grid(is_mod_fac ~ .) + 
+        coord_cartesian(ylim = c(10, 35)) + 
+        labs(x = "Run", y = "Log2-intensity", title = protein) + 
+        theme_bw() + 
+        guides(colour = guide_legend(nrow = 1, title = NULL)) + 
+        theme(legend.position = c(0.5, 0.065)) + 
+        theme(axis.text.x = element_blank())
+}
+
+
+# Profile plots for site data with annotations for missing values
+plot_sprofile_aft <- function(df_allprot, protein, run_level) {
+    df_prot <- df_allprot %>% filter(uniprot_iso == protein)
+    # Complete possible combinations of peptide features and runs
+    mpar <- df_prot %>% distinct(site_str, feature, is_mod)
+    df_fill <- df_prot %>% 
+        select(feature, run, ind_obs, log2inty) %>% 
+        complete(run = run_level, feature) %>% 
+        left_join(mpar) %>% 
+        mutate(
+            is_mod_fac = factor(ifelse(is_mod, "Modified", "Unmodified")), 
+            run_fac = factor(run, levels = run_level), 
+            ind_obs = factor(ind_obs, levels = c("0", "1"))
+        )
+    # Feature profiles categorized by modification
+    df_fill_mod <- filter(df_fill, is_mod)
+    df_fill_unmod <- filter(df_fill, !is_mod)
+    ggplot(df_fill_mod, aes(run_fac, log2inty, group = feature, color = site_str, alpha = ind_obs)) + 
+        geom_point(size = 2) +
+        geom_line() + 
+        geom_point(data = df_fill_unmod, aes(run_fac, log2inty, alpha = ind_obs), color = "gray", size = 2) + 
+        geom_line(data = df_fill_unmod, aes(run_fac, log2inty, group = feature), color = "gray") + 
+        geom_vline(xintercept = 8.5) + 
+        scale_alpha_manual(values = c("0" = 0.4, "1" = 0.9), guide = FALSE) + 
+        facet_grid(is_mod_fac ~ .) + 
+        coord_cartesian(ylim = c(5, 35)) + 
+        labs(x = "Run", y = "Log2-intensity", title = protein) + 
+        theme_bw() + 
+        guides(color = guide_legend(nrow = 1, title = NULL)) + 
+        theme(legend.position = c(0.5, 0.065)) + 
+        # theme(axis.text.x = element_text(angle = 90, hjust = 1))
+        theme(axis.text.x = element_blank())
+}
