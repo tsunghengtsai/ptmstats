@@ -51,12 +51,13 @@ subj_uniq <- unique(df_design$id_subject)
 subj_key <- str_c("S", str_pad(seq_along(subj_uniq), width = 2, pad = "0"))
 df_design <- tbl_df(df_design) %>% 
     mutate(
+        group = cond_treatment, 
         subj = plyr::mapvalues(id_subject, from = subj_uniq, to = subj_key), 
         biorep = if_else(ann_objective_id == 16612, "B1", "B2"), 
-        batch = biorep, 
+        batch = if_else(ann_objective_id == 16612, "BCH1", "BCH2"), 
         techrep = str_c("T", id_injectionset), 
         run_bt = str_c(biorep, techrep), 
-        run_cbt = str_c(id_subject, run_bt, sep = "-")
+        run_cbt = str_c(group, run_bt, sep = "-")
     )
 
 
@@ -66,7 +67,7 @@ df_work <- df_work %>%
         is_mod = str_detect(peptide, "\\*"), 
         feature = str_c(peptide, ms2_charge, sep = "_"), 
         log2inty = ifelse(vista_peak_area_light <= 1, 0, log2(vista_peak_area_light)), 
-        group = plyr::mapvalues(run_id, from = df_design$run_id, to = df_design$cond_treatment), 
+        group = plyr::mapvalues(run_id, from = df_design$run_id, to = df_design$group), 
         biorep = plyr::mapvalues(run_id, from = df_design$run_id, to = df_design$biorep), 
         batch = plyr::mapvalues(run_id, from = df_design$run_id, to = df_design$batch), 
         techrep = plyr::mapvalues(run_id, from = df_design$run_id, to = df_design$techrep), 
@@ -129,7 +130,6 @@ df_fasmod <- df_fasmod %>% filter(nb_mch == 1)
 
 # Modification sites
 mod_resymb <- str_c(mod_residue, mod_symbol)
-
 df_fasmod <- df_fasmod %>% 
     mutate(
         site_all = map2(peptide_unmod_trimmed, pep_idx, locate_site, mod_residue), 
@@ -293,6 +293,7 @@ nested_allbch_aft <- nested_allbch_aft %>%
         df_res = map_dbl(lm_fit, df.residual)
     )
 
+
 # Extract estimated parameters --------------------------------------------
 site_perbch <- nested_perbch_aft %>% 
     filter(site_str != "UNMOD") %>% 
@@ -302,8 +303,20 @@ site_allbch <- nested_allbch_aft %>%
     filter(site_str != "UNMOD") %>% 
     unnest(param)
 
-param_perbch <- site_perbch %>% unite(protsite, uniprot_iso, site_str, sep = "--")
-param_allbch <- site_allbch %>% unite(protsite, uniprot_iso, site_str, sep = "--")
+unmod_perbch <- nested_perbch_aft %>% 
+    filter(site_str == "UNMOD") %>% 
+    unnest(param) %>% 
+    select(-site_str) %>% 
+    rename(df_unmod = df_res, est_unmod = estimate, se_unmod = std.error)
+
+unmod_allbch <- nested_allbch_aft %>% 
+    filter(site_str == "UNMOD") %>% 
+    unnest(param) %>% 
+    select(-site_str) %>% 
+    rename(df_unmod = df_res, est_unmod = estimate, se_unmod = std.error)
+
+param_perbch <- site_perbch %>% left_join(unmod_perbch) %>% unite(protsite, uniprot_iso, site_str, sep = "--")
+param_allbch <- site_allbch %>% left_join(unmod_allbch) %>% unite(protsite, uniprot_iso, site_str, sep = "--")
 
 # Keep parameters with std error for across-batch inference
 param_perbch <- param_perbch %>% 
@@ -319,20 +332,23 @@ cases = c("MUL1_DOX", "MUL1_DOX_USP30_KO", "MUL1_DOX_USP30_KO")
 controls = c("CTRL_NODOX", "CTRL_NODOX_USP30_KO", "MUL1_DOX")
 
 test_null1 <- vector("list", length = length(cases))
-# test_null2 <- vector("list", length = length(cases))
+test_null2 <- vector("list", length = length(cases))
 test_null3 <- vector("list", length = length(cases))
-# test_null4 <- vector("list", length = length(cases))
+test_null4 <- vector("list", length = length(cases))
 for (i in seq_along(cases)) {
     grp_ctrl <- controls[i]
     grp_case <- cases[i]
     # Per-batch model
     test_null1[[i]] <- test_mod_bch(param_perbch, grp_ctrl, grp_case) %>% mutate(hyp = "null1")
+    test_null2[[i]] <- test_adjmod_bch(param_perbch, grp_ctrl, grp_case) %>% mutate(hyp = "null2")
     # All-batch model
     test_null3[[i]] <- test_mod(param_allbch, grp_ctrl, grp_case) %>% mutate(hyp = "null3")
+    test_null4[[i]] <- test_adjmod(param_allbch, grp_ctrl, grp_case) %>% mutate(hyp = "null4")
 }
 
-test_all <- bind_rows(test_null1, test_null3) %>% 
-    group_by(hyp) %>% 
+test_all <- bind_rows(test_null1, test_null2, test_null3, test_null4) %>% 
+    group_by(hyp) %>%
+    # group_by(hyp, ctrx) %>%
     mutate(p_adj = p.adjust(p_val, method = "BH")) %>% 
     ungroup()
 test_all$p_adj[test_all$logFC %in% c(Inf, -Inf)] <- 0  # Missing in one group
