@@ -51,12 +51,13 @@ subj_uniq <- unique(df_design$id_subject)
 subj_key <- str_c("S", str_pad(seq_along(subj_uniq), width = 2, pad = "0"))
 df_design <- tbl_df(df_design) %>% 
     mutate(
+        group = id_subject, 
         subj = plyr::mapvalues(id_subject, from = subj_uniq, to = subj_key), 
         biorep = if_else(ann_objective_id == 37122, "B1", "B2"), 
-        batch = biorep, 
+        batch = if_else(ann_objective_id == 37122, "BCH1", "BCH2"), 
         techrep = str_c("T", id_injectionset), 
         run_bt = str_c(biorep, techrep), 
-        run_cbt = str_c(id_subject, run_bt, sep = "-")
+        run_cbt = str_c(group, run_bt, sep = "-")
     )
 
 
@@ -66,7 +67,7 @@ df_work <- df_work %>%
         is_mod = str_detect(peptide, "\\*"), 
         feature = str_c(peptide, ms2_charge, sep = "_"), 
         log2inty = ifelse(vista_peak_area_light <= 1, 0, log2(vista_peak_area_light)), 
-        group = plyr::mapvalues(run_id, from = df_design$run_id, to = df_design$id_subject), 
+        group = plyr::mapvalues(run_id, from = df_design$run_id, to = df_design$group), 
         biorep = plyr::mapvalues(run_id, from = df_design$run_id, to = df_design$biorep), 
         batch = plyr::mapvalues(run_id, from = df_design$run_id, to = df_design$batch), 
         techrep = plyr::mapvalues(run_id, from = df_design$run_id, to = df_design$techrep), 
@@ -130,7 +131,6 @@ df_fasmod <- df_fasmod %>% filter(nb_mch == 1)
 
 # Modification sites
 mod_resymb <- str_c(mod_residue, mod_symbol)
-
 df_fasmod <- df_fasmod %>% 
     mutate(
         site_all = map2(peptide_unmod_trimmed, pep_idx, locate_site, mod_residue), 
@@ -317,7 +317,8 @@ for (i in seq_along(cases)) {
 }
 
 test_all <- bind_rows(test_null1, test_null2, test_null3, test_null4) %>% 
-    group_by(hyp) %>% 
+    group_by(hyp) %>%
+    # group_by(hyp, ctrx) %>% 
     mutate(p_adj = p.adjust(p_val, method = "BH")) %>% 
     ungroup()
 test_all$p_adj[test_all$logFC %in% c(Inf, -Inf)] <- 0  # Missing in one group
