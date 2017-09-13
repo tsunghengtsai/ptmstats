@@ -55,6 +55,34 @@ normalize_mod <- function(data) {
 }
 
 
+# Annotate censored values and fill with AFT
+fill_aft <- function(data) {
+    if (n_distinct(data$feature) == 1) return(data)  # only one feature
+    if (all(!is.na(data$log2inty))) return(data)  # no missing value
+    # Annotate observation status and add censored values
+    aftdata <- data %>% 
+        mutate(ind_obs = ifelse(is.na(log2inty), 0L, 1L)) %>% 
+        group_by(feature) %>% 
+        mutate(log2inty_aft = ifelse(ind_obs == 0, 0.99 * min(log2inty[ind_obs == 1]), log2inty)) %>% 
+        ungroup()
+    # AFT model with effects of run and feature
+    fit <- tryCatch(
+        survreg(Surv(log2inty_aft, ind_obs, type = "left") ~ run + feature, data = aftdata, dist = "gaussian"), 
+        error = function(e) e, warning = function(w) w
+    )
+    if (is(fit, "warning")) return(data)  # not converged
+    aftdata <- aftdata %>% 
+        mutate(
+            log2inty_pred = predict(fit), 
+            log2inty = ifelse(ind_obs == 0, pmin(log2inty_pred, log2inty_aft), log2inty_aft)
+        ) %>% 
+        select(-log2inty_aft, -log2inty_pred, -ind_obs)
+    
+    return(aftdata)
+}
+
+
+
 # Annotate observation status and add censored values
 annot_obs <- function(data) {
     augdata <- data %>% 
@@ -72,8 +100,13 @@ fill_censored <- function(aftdata) {
     if (n_distinct(aftdata$feature) == 1) return(aftdata %>% select(-log2inty_aft))  # only one feature
     if (all(aftdata$ind_obs == 1)) return(aftdata %>% select(-log2inty_aft))  # no missing value
     # AFT model with effects of run and feature
-    fit <- survreg(Surv(log2inty_aft, ind_obs, type = "left") ~ run + feature,
-                   data = aftdata, dist = "gaussian")
+    fit <- tryCatch(
+        survreg(Surv(log2inty_aft, ind_obs, type = "left") ~ run + feature, data = aftdata, dist = "gaussian"), 
+        error = function(e) e, warning = function(w) w
+    )
+    if (is(fit, "warning")) return(aftdata %>% select(-log2inty_aft))  # not converged
+    # fit <- survreg(Surv(log2inty_aft, ind_obs, type = "left") ~ run + feature,
+    #                data = aftdata, dist = "gaussian")
     aftdata <- aftdata %>% 
         mutate(
             log2inty_pred = predict(fit), 
@@ -211,23 +244,26 @@ test_mod <- function(df_mod, grp_ctrl, grp_case) {
         group_by(protsite, df_res) %>% 
         summarise(log2fc = diff(estimate), se2 = sum(std.error ^ 2)) %>% 
         ungroup()
-    # Missing in one group
-    part_mod <- full_mod %>% anti_join(diff_mod)
-    untest_mod <- part_mod %>% 
-        filter(!is.na(df_res)) %>% 
-        distinct(protsite, key_grp) %>% 
-        mutate(
-            logFC = ifelse(key_grp == "G1", Inf, -Inf), 
-            SE = NA, DF = NA, t_stat = NA, p_val = NA, 
-            ctrx = paste(grp_case, grp_ctrl, sep = " vs ")
-        ) %>% select(-key_grp)
     res <- diff_mod %>% 
         mutate(logFC = log2fc, SE = sqrt(se2), DF = df_res, 
                t_stat = logFC / SE, p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)) %>% 
         select(protsite, logFC, SE, DF, t_stat, p_val) %>% 
-        mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs ")) %>% 
-        bind_rows(untest_mod)
-    
+        mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs "))
+    # Missing in one group
+    part_mod <- full_mod %>% 
+        anti_join(diff_mod %>% select(protsite)) %>% 
+        filter(!is.na(df_res)) %>% 
+        distinct(protsite, key_grp)
+    if (nrow(part_mod) > 0) {
+        untest_mod <- part_mod %>% 
+            mutate(
+                logFC = ifelse(key_grp == "G1", Inf, -Inf), 
+                SE = NA, DF = NA, t_stat = NA, p_val = NA, 
+                ctrx = paste(grp_case, grp_ctrl, sep = " vs ")
+            ) %>% select(-key_grp)
+        res <- res %>% bind_rows(untest_mod)
+    }
+
     return(res)
 }
 
@@ -236,7 +272,7 @@ test_mod <- function(df_mod, grp_ctrl, grp_case) {
 test_adjmod <- function(df_mod, grp_ctrl, grp_case) {
     full_mod <- df_mod %>% 
         filter(group %in% c(grp_ctrl, grp_case)) %>% 
-        filter(!is.na(df_res)) %>% 
+        filter(!is.na(df_res) | !is.na(df_unmod)) %>% 
         mutate(key_grp = ifelse(group == grp_ctrl, "G0", "G1")) %>% 
         complete(protsite, key_grp)
     # Model-based inference of log-difference
@@ -248,24 +284,30 @@ test_adjmod <- function(df_mod, grp_ctrl, grp_case) {
             log2fc = diff(estimate), se2 = sum(std.error ^ 2), 
             log2fc_unmod = diff(est_unmod), se2_unmod = sum(se_unmod ^ 2)
         ) %>% ungroup()
-    # Missing in one group
-    part_mod <- full_mod %>% anti_join(diff_mod)
-    untest_mod <- part_mod %>% 
-        filter(!is.na(df_res), !is.na(df_unmod)) %>% 
-        distinct(protsite, key_grp) %>% 
-        mutate(
-            logFC = ifelse(key_grp == "G1", Inf, -Inf), 
-            SE = NA, DF = NA, t_stat = NA, p_val = NA, 
-            ctrx = paste(grp_case, grp_ctrl, sep = " vs ")
-        ) %>% select(-key_grp)
     res <- diff_mod %>% 
         mutate(logFC = log2fc - log2fc_unmod, SE = sqrt(se2 + se2_unmod), 
                DF = (se2 + se2_unmod) ^ 2 / (se2 ^ 2 / df_res + se2_unmod ^ 2 / df_unmod), 
                t_stat = logFC / SE, p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)) %>% 
         select(protsite, logFC, SE, DF, t_stat, p_val) %>% 
-        mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs ")) %>% 
-        bind_rows(untest_mod)
-    
+        mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs "))
+    # Missing in one group
+    part_mod <- full_mod %>% 
+        anti_join(diff_mod %>% select(protsite)) %>% 
+        group_by(protsite) %>% 
+        filter(all(is.na(df_res) == is.na(df_unmod))) %>% 
+        ungroup() %>% 
+        filter(!is.na(df_res)) %>% 
+        distinct(protsite, key_grp)
+    if (nrow(part_mod) > 0) {
+        untest_mod <- part_mod %>% 
+            mutate(
+                logFC = ifelse(key_grp == "G1", Inf, -Inf), 
+                SE = NA, DF = NA, t_stat = NA, p_val = NA, 
+                ctrx = paste(grp_case, grp_ctrl, sep = " vs ")
+            ) %>% select(-key_grp)
+        res <- res %>% bind_rows(untest_mod)
+    }
+
     return(res)
 }
 
@@ -284,26 +326,33 @@ test_mod_bch <- function(df_mod, grp_ctrl, grp_case) {
         group_by(protsite, batch, df_res) %>% 
         summarise(log2fc = diff(estimate), se2 = sum(std.error ^ 2)) %>% 
         ungroup()
-    # Missing in one group
-    part_mod <- full_mod %>% anti_join(diff_mod)
-    untest_mod <- part_mod %>% 
-        group_by(protsite, key_grp) %>% 
-        filter(all(!is.na(df_res))) %>% 
-        ungroup() %>% 
-        distinct(protsite, key_grp) %>% 
-        mutate(
-            logFC = ifelse(key_grp == "G1", Inf, -Inf), 
-            SE = NA, DF = NA, t_stat = NA, p_val = NA, 
-            ctrx = paste(grp_case, grp_ctrl, sep = " vs ")
-        ) %>% select(-key_grp)
     res <- diff_mod %>% 
         group_by(protsite) %>% 
         summarise(logFC = mean(log2fc), SE = sqrt(sum(se2)) / n(), 
                   DF = sum(se2) ^ 2 / sum(se2 ^ 2 / df_res), 
                   t_stat = logFC / SE, p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)) %>% 
-        mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs ")) %>% 
-        bind_rows(untest_mod)
-    
+        mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs "))
+    # Missing in one group
+    part_mod <- full_mod %>% 
+        anti_join(diff_mod %>% select(protsite)) %>% 
+        group_by(protsite) %>% 
+        filter(
+            n_distinct(is.na(df_res[key_grp == "G0"])) == 1, 
+            n_distinct(is.na(df_res[key_grp == "G1"])) == 1
+        ) %>% 
+        ungroup() %>% 
+        filter(!is.na(df_res)) %>% 
+        distinct(protsite, key_grp)
+    if (nrow(part_mod) > 0) {
+        untest_mod <- part_mod %>% 
+            mutate(
+                logFC = ifelse(key_grp == "G1", Inf, -Inf), 
+                SE = NA, DF = NA, t_stat = NA, p_val = NA, 
+                ctrx = paste(grp_case, grp_ctrl, sep = " vs ")
+            ) %>% select(-key_grp)
+        res <- res %>% bind_rows(untest_mod)
+    }
+
     return(res)
 }
 
@@ -312,7 +361,7 @@ test_mod_bch <- function(df_mod, grp_ctrl, grp_case) {
 test_adjmod_bch <- function(df_mod, grp_ctrl, grp_case) {
     full_mod <- df_mod %>% 
         filter(group %in% c(grp_ctrl, grp_case)) %>% 
-        filter(!is.na(df_res)) %>% 
+        filter(!is.na(df_res) | !is.na(df_unmod)) %>% 
         mutate(key_grp = ifelse(group == grp_ctrl, "G0", "G1")) %>% 
         complete(protsite, batch, key_grp)
     # Model-based inference of log-difference
@@ -324,18 +373,6 @@ test_adjmod_bch <- function(df_mod, grp_ctrl, grp_case) {
             log2fc = diff(estimate), se2 = sum(std.error ^ 2),
             log2fc_unmod = diff(est_unmod), se2_unmod = sum(se_unmod ^ 2)
         ) %>% ungroup()
-    # Missing in one group
-    part_mod <- full_mod %>% anti_join(diff_mod)
-    untest_mod <- part_mod %>% 
-        group_by(protsite, key_grp) %>% 
-        filter(all(!is.na(df_res)), all(!is.na(df_unmod))) %>% 
-        ungroup() %>% 
-        distinct(protsite, key_grp) %>% 
-        mutate(
-            logFC = ifelse(key_grp == "G1", Inf, -Inf), 
-            SE = NA, DF = NA, t_stat = NA, p_val = NA, 
-            ctrx = paste(grp_case, grp_ctrl, sep = " vs ")
-        ) %>% select(-key_grp)
     res <- diff_mod %>% 
         group_by(protsite) %>% 
         summarise(
@@ -344,9 +381,30 @@ test_adjmod_bch <- function(df_mod, grp_ctrl, grp_case) {
             DF = (sum(se2) + sum(se2_unmod)) ^ 2 / sum(se2 ^ 2 / df_res + se2_unmod ^ 2 / df_unmod), 
             t_stat = logFC / SE, p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)
         ) %>% 
-        mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs ")) %>% 
-        bind_rows(untest_mod)
+        mutate(ctrx = paste(grp_case, grp_ctrl, sep = " vs "))
+    # Missing in one group
+    part_mod <- full_mod %>% 
+        anti_join(diff_mod %>% select(protsite)) %>% 
+        group_by(protsite) %>% 
+        filter(all(is.na(df_res) == is.na(df_unmod))) %>% 
+        filter(
+            n_distinct(is.na(df_res[key_grp == "G0"])) == 1, 
+            n_distinct(is.na(df_res[key_grp == "G1"])) == 1
+        ) %>% 
+        ungroup() %>% 
+        filter(!is.na(df_res)) %>% 
+        distinct(protsite, key_grp)
     
+    if (nrow(part_mod) > 0) {
+        untest_mod <- part_mod %>% 
+            mutate(
+                logFC = ifelse(key_grp == "G1", Inf, -Inf), 
+                SE = NA, DF = NA, t_stat = NA, p_val = NA, 
+                ctrx = paste(grp_case, grp_ctrl, sep = " vs ")
+            ) %>% select(-key_grp)
+        res <- res %>% bind_rows(untest_mod)
+    }
+
     return(res)
 }
 
@@ -407,7 +465,7 @@ plot_sprofile_aft <- function(df_allprot, protein, run_level) {
         geom_vline(xintercept = 8.5) + 
         scale_alpha_manual(values = c("0" = 0.4, "1" = 0.9), guide = FALSE) + 
         facet_grid(is_mod_fac ~ .) + 
-        coord_cartesian(ylim = c(5, 35)) + 
+        coord_cartesian(ylim = c(10, 30)) + 
         labs(x = "Run", y = "Log2-intensity", title = protein) + 
         theme_bw() + 
         guides(color = guide_legend(nrow = 1, title = NULL)) + 
