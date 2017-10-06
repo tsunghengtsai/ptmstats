@@ -228,6 +228,30 @@ tidy_bch <- function(bch_fit, df_bch) {
 }
 
 
+# Extract estimated parameters
+extract_param <- function(nested_data) {
+    if ("batch" %in% names(nested_data)) {
+        # per-batch model
+        nested_param <- nested_data %>% 
+            select(uniprot_iso, site_str, batch, param, df_res)
+    } else {
+        # all-batch model
+        nested_param <- nested_data %>% 
+            select(uniprot_iso, site_str, param, df_res)
+    }
+    param_mod <- nested_param %>% 
+        filter(site_str != "UNMOD") %>% 
+        unnest(param)
+    param_unmod <- nested_param %>% 
+        filter(site_str == "UNMOD") %>% 
+        select(-site_str) %>% 
+        unnest(param) %>% 
+        rename(df_unmod = df_res, est_unmod = estimate, se_unmod = std.error)
+    
+    return(left_join(param_mod, param_unmod) %>% unite(protsite, uniprot_iso, site_str, sep = "--"))
+}
+
+
 # Differential analysis ---------------------------------------------------
 
 # Testing for differential modification
