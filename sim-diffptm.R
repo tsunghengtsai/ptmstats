@@ -166,10 +166,85 @@ gen_sitenprot <- function(d_bch, std_bch, d_cnd, dprot_cnd, nb_sim, nb_rep, nb_g
 
 
 
+# Generate two-group data with multiple sites per protein
+gen_msites <- function(d_bch, std_bch, d_cnd, dprot_cnd, nb_sim, nb_rep, nb_site = 1, log2level = 25) {
+    # Error checking
+    if (length(d_bch) != length(std_bch)) 
+        stop("d_bch & std_bch imply different # of batches")
+    if (nb_site < 1)
+        stop("Number of sites should be greater or equal to 1")
+
+    nb_grp <- 2
+    
+    nb_bch <- length(d_bch)
+    mu0 <- log2level + d_bch
+    mu1 <- mu0 + d_cnd
+    
+    mu_prot0 <- rep(log2level, nb_bch)  # assume no batch effect for unmodified peptides
+    mu_prot1 <- mu_prot0 + dprot_cnd
+    std_prot <- rep(std_bch[1], nb_bch)
+    
+    site_samp <- prot_samp <- vector("list", nb_sim)
+    for (s in 1:nb_sim) {
+        # Site-level modification
+        samp_0 <- samp_1 <- vector("list", nb_site)
+        for (ss in 1:nb_site) {
+            samp_0[[ss]] <- tibble(
+                log2inty = rnorm(nb_bch * nb_rep, mean = rep(mu0, nb_rep), sd = rep(std_bch, nb_rep)), 
+                idx_sim = rep(s, nb_bch * nb_rep), 
+                group = rep("G0", nb_bch * nb_rep), 
+                batch = rep(paste0("B", 1:nb_bch), nb_rep), 
+                tech = rep(paste0("T", 1:nb_rep), each = nb_bch), 
+                run = paste(group, paste0(batch, tech), sep = "_"), 
+                site = rep(paste0("S", ss), nb_bch * nb_rep)
+            )
+            samp_1[[ss]] <- tibble(
+                log2inty = rnorm(nb_bch * nb_rep, mean = rep(mu1, nb_rep), sd = rep(std_bch, nb_rep)), 
+                idx_sim = rep(s, nb_bch * nb_rep), 
+                group = rep("G1", nb_bch * nb_rep), 
+                batch = rep(paste0("B", 1:nb_bch), nb_rep), 
+                tech = rep(paste0("T", 1:nb_rep), each = nb_bch), 
+                run = paste(group, paste0(batch, tech), sep = "_"), 
+                site = rep(paste0("S", ss), nb_bch * nb_rep)
+            )
+        }
+
+        # Protein abundance
+        prot_0 <- tibble(
+            log2inty = rnorm(nb_bch * nb_rep, mean = rep(mu_prot0, nb_rep), sd = rep(std_prot, nb_rep)), 
+            idx_sim = rep(s, nb_bch * nb_rep), 
+            group = rep("G0", nb_bch * nb_rep), 
+            batch = rep(paste0("B", 1:nb_bch), nb_rep), 
+            tech = rep(paste0("T", 1:nb_rep), each = nb_bch), 
+            run = paste(group, paste0(batch, tech), sep = "_"), 
+            site = rep("UNMOD", nb_bch * nb_rep)
+        )
+        prot_1 <- tibble(
+            log2inty = rnorm(nb_bch * nb_rep, mean = rep(mu_prot1, nb_rep), sd = rep(std_prot, nb_rep)), 
+            idx_sim = rep(s, nb_bch * nb_rep), 
+            group = rep("G1", nb_bch * nb_rep), 
+            batch = rep(paste0("B", 1:nb_bch), nb_rep), 
+            tech = rep(paste0("T", 1:nb_rep), each = nb_bch), 
+            run = paste(group, paste0(batch, tech), sep = "_"), 
+            site = rep("UNMOD", nb_bch * nb_rep)
+        )
+        
+        site_samp[[s]] <- bind_rows(bind_rows(samp_0), bind_rows(samp_1))
+        prot_samp[[s]] <- bind_rows(prot_0, prot_1)
+    }
+    
+    # Combine site-level & protein data
+    full_samp <- bind_rows(bind_rows(site_samp), bind_rows(prot_samp))
+    
+    return(full_samp)
+}
+
+
 test_perbch_sim <- function(simdata) {
     # Fit per-batch model
     nested_perbch <- simdata %>% 
-        group_by(idx_sim, batch) %>% 
+        group_by(idx_sim, site, batch) %>% 
+        # group_by(idx_sim, batch) %>% 
         nest() %>% 
         mutate(lm_fit = map(data, lm_perbch)) %>% 
         mutate(
@@ -178,22 +253,26 @@ test_perbch_sim <- function(simdata) {
         )
     # Extract parameters
     param_perbch <- nested_perbch %>% 
-        select(idx_sim, batch, param, df_res) %>% 
+        select(idx_sim, site, batch, param, df_res) %>% 
+        # select(idx_sim, batch, param, df_res) %>% 
         unnest(param)
     # Model-based inference of log-difference
     diff_mod <- param_perbch %>% 
         filter(group %in% c("G0", "G1")) %>% 
-        group_by(idx_sim, batch, df_res) %>% 
+        group_by(idx_sim, site, batch, df_res) %>% 
+        # group_by(idx_sim, batch, df_res) %>% 
         summarise(log2fc = diff(estimate), se2 = sum(std.error ^ 2)) %>% 
         ungroup()
     res <- diff_mod %>% 
-        group_by(idx_sim) %>% 
+        group_by(idx_sim, site) %>% 
+        # group_by(idx_sim) %>% 
         summarise(
             logFC = mean(log2fc), SE = sqrt(sum(se2)) / n(), 
             DF = sum(se2) ^ 2 / sum(se2 ^ 2 / df_res), t_stat = logFC / SE, 
             p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)
         ) %>% 
-        select(-SE)
+        ungroup() %>% select(-SE)
+        # select(-SE)
 
     return(res)
 }
@@ -202,7 +281,8 @@ test_perbch_sim <- function(simdata) {
 test_allbch_sim <- function(simdata) {
     # Fit all-batch model
     nested_allbch <- simdata %>% 
-        group_by(idx_sim) %>% 
+        group_by(idx_sim, site) %>% 
+        # group_by(idx_sim) %>% 
         nest() %>% 
         mutate(lm_fit = map(data, lm_allbch)) %>% 
         mutate(
@@ -211,20 +291,24 @@ test_allbch_sim <- function(simdata) {
         )
     # Extract parameters
     param_allbch <- nested_allbch %>% 
-        select(idx_sim, param, df_res) %>% 
+        select(idx_sim, site, param, df_res) %>% 
+        # select(idx_sim, param, df_res) %>% 
         unnest(param)
     # Model-based inference of log-difference
     diff_mod <- param_allbch %>% 
         filter(group %in% c("G0", "G1")) %>% 
-        group_by(idx_sim, df_res) %>% 
+        group_by(idx_sim, site, df_res) %>% 
+        # group_by(idx_sim, df_res) %>% 
         summarise(log2fc = diff(estimate), se2 = sum(std.error ^ 2)) %>% 
         ungroup()
     res <- diff_mod %>% 
+        group_by(idx_sim, site) %>% 
         mutate(
             logFC = log2fc, SE = sqrt(se2), DF = df_res, t_stat = logFC / SE, 
             p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)
         ) %>% 
-        select(idx_sim, logFC, DF, t_stat, p_val)
+        ungroup() %>% select(idx_sim, site, logFC, DF, t_stat, p_val)
+        # select(idx_sim, logFC, DF, t_stat, p_val)
     
     return(res)
 }
@@ -255,21 +339,24 @@ test_adjperbch_sim <- function(simdata) {
     # Model-based inference of log-difference
     diff_mod <- param_perbch %>% 
         filter(group %in% c("G0", "G1")) %>% 
-        group_by(idx_sim, batch, df_res, df_unmod) %>% 
+        group_by(idx_sim, site, batch, df_res, df_unmod) %>% 
+        # group_by(idx_sim, batch, df_res, df_unmod) %>% 
         summarise(
             log2fc = diff(estimate), se2 = sum(std.error ^ 2),
             log2fc_unmod = diff(est_unmod), se2_unmod = sum(se_unmod ^ 2)
         ) %>% 
         ungroup()
     res <- diff_mod %>% 
-        group_by(idx_sim) %>% 
+        group_by(idx_sim, site) %>% 
+        # group_by(idx_sim) %>% 
         summarise(
             logFC = mean(log2fc) - mean(log2fc_unmod), 
             SE = sqrt(sum(se2) + sum(se2_unmod)) / n(), 
             DF = (sum(se2) + sum(se2_unmod)) ^ 2 / sum(se2 ^ 2 / df_res + se2_unmod ^ 2 / df_unmod), 
             t_stat = logFC / SE, p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)
         ) %>% 
-        select(-SE)
+        ungroup() %>% select(-SE)
+        # select(-SE)
 
     return(res)
 }
@@ -299,17 +386,21 @@ test_adjallbch_sim <- function(simdata) {
     # Model-based inference of log-difference
     diff_mod <- param_allbch %>% 
         filter(group %in% c("G0", "G1")) %>% 
-        group_by(idx_sim, df_res, df_unmod) %>% 
+        group_by(idx_sim, site, df_res, df_unmod) %>% 
+        # group_by(idx_sim, df_res, df_unmod) %>% 
         summarise(
             log2fc = diff(estimate), se2 = sum(std.error ^ 2), 
             log2fc_unmod = diff(est_unmod), se2_unmod = sum(se_unmod ^ 2)
         ) %>% 
         ungroup()
     res <- diff_mod %>% 
+        group_by(idx_sim, site) %>% 
         mutate(logFC = log2fc - log2fc_unmod, SE = sqrt(se2 + se2_unmod), 
                DF = (se2 + se2_unmod) ^ 2 / (se2 ^ 2 / df_res + se2_unmod ^ 2 / df_unmod), 
                t_stat = logFC / SE, p_val = 2 * pt(abs(t_stat), df = DF, lower.tail = FALSE)) %>% 
-        select(idx_sim, logFC, DF, t_stat, p_val)
+        select(idx_sim, site, logFC, DF, t_stat, p_val) %>% 
+        ungroup()
+        # select(idx_sim, logFC, DF, t_stat, p_val)
     
     return(res)
 }
@@ -321,16 +412,19 @@ ttest_allbch_sim <- function(simdata) {
     # test across batches
     test_allbch <- simdata %>% 
         filter(group %in% c("G0", "G1")) %>% 
-        group_by(idx_sim) %>% 
+        group_by(idx_sim, site) %>% 
+        # group_by(idx_sim) %>% 
         nest() %>% 
         mutate(ttest = map(data, ~t.test(log2inty ~ group, data = .))) %>% 
         mutate(param = map(ttest, tidy))
     
     res <- test_allbch %>% 
-        select(idx_sim, param) %>% 
+        select(idx_sim, site, param) %>% 
+        # select(idx_sim, param) %>% 
         unnest(param) %>% 
         mutate(logFC = -estimate) %>% 
-        select(idx_sim, logFC, t_stat = statistic, DF = parameter, p_val = p.value)
+        select(idx_sim, site, logFC, t_stat = statistic, DF = parameter, p_val = p.value)
+        # select(idx_sim, logFC, t_stat = statistic, DF = parameter, p_val = p.value)
     
     return(res)
 }
@@ -341,19 +435,23 @@ ttest_minpval_sim <- function(simdata) {
     # test within batches
     test_perbch <- simdata %>% 
         filter(group %in% c("G0", "G1")) %>% 
-        group_by(idx_sim, batch) %>% 
+        group_by(idx_sim, site, batch) %>% 
+        # group_by(idx_sim, batch) %>% 
         nest() %>% 
         mutate(ttest = map(data, ~t.test(log2inty ~ group, data = .))) %>% 
         mutate(param = map(ttest, tidy))
     # Take the most significant batch
     res <- test_perbch %>% 
-        select(idx_sim, batch, param) %>% 
+        select(idx_sim, site, batch, param) %>% 
+        # select(idx_sim, batch, param) %>% 
         unnest(param) %>% 
-        group_by(idx_sim) %>% 
+        group_by(idx_sim, site) %>% 
+        # group_by(idx_sim) %>% 
         filter(p.value == min(p.value)) %>% 
         ungroup() %>% 
         mutate(logFC = -estimate) %>% 
-        select(idx_sim, logFC, t_stat = statistic, DF = parameter, p_val = p.value)
+        select(idx_sim, site, logFC, t_stat = statistic, DF = parameter, p_val = p.value)
+        # select(idx_sim, logFC, t_stat = statistic, DF = parameter, p_val = p.value)
     
     return(res)
 }
@@ -364,25 +462,30 @@ ttest_maxpval_sim <- function(simdata) {
     # test within batches
     test_perbch <- simdata %>% 
         filter(group %in% c("G0", "G1")) %>% 
-        group_by(idx_sim, batch) %>% 
+        group_by(idx_sim, site, batch) %>% 
+        # group_by(idx_sim, batch) %>% 
         nest() %>% 
         mutate(ttest = map(data, ~t.test(log2inty ~ group, data = .))) %>% 
         mutate(param = map(ttest, tidy))
     # logFC based on average over batches; the rest takes the least significant batch
     res <- test_perbch %>% 
-        select(idx_sim, batch, param) %>% 
+        select(idx_sim, site, batch, param) %>% 
+        # select(idx_sim, batch, param) %>% 
         unnest(param) %>% 
-        group_by(idx_sim) %>% 
+        group_by(idx_sim, site) %>% 
+        # group_by(idx_sim) %>% 
         mutate(logFC = -mean(estimate)) %>% 
         filter(p.value == max(p.value)) %>% 
         ungroup() %>% 
-        select(idx_sim, logFC, t_stat = statistic, DF = parameter, p_val = p.value)
+        select(idx_sim, site, logFC, t_stat = statistic, DF = parameter, p_val = p.value)
+        # select(idx_sim, logFC, t_stat = statistic, DF = parameter, p_val = p.value)
     
     return(res)
 }
 
 
 alltest_sim <- function(simdata) {
+    simdata <- simdata %>% mutate(site = "MOD")
     res <- bind_rows(
         simdata %>% ttest_allbch_sim() %>% mutate(method = "t-test (no batch)"),
         simdata %>% ttest_maxpval_sim() %>% mutate(method = "t-test (all batch)"),
@@ -399,15 +502,15 @@ alladjtest_sim <- function(simdata) {
     res <- bind_rows(
         simdata %>% test_adjperbch_sim() %>% mutate(method = "Proposed (adj. per-batch)"),
         simdata %>% test_adjallbch_sim() %>% mutate(method = "Proposed (adj. all-batch)"),
-        simdata %>% filter(site == "MOD") %>% test_perbch_sim() %>% mutate(method = "Proposed (per-batch)"),
-        simdata %>% filter(site == "MOD") %>% test_allbch_sim() %>% mutate(method = "Proposed (all-batch)")
+        simdata %>% filter(site != "UNMOD") %>% test_perbch_sim() %>% mutate(method = "Proposed (per-batch)"),
+        simdata %>% filter(site != "UNMOD") %>% test_allbch_sim() %>% mutate(method = "Proposed (all-batch)")
     )
     
     return(res)
 }
 
 
-# 1st investigation: batch effects ----------------------------------------
+# Simulation 1: batch effects ---------------------------------------------
 
 nb_sim <- 500
 nb_bch <- 2
@@ -484,7 +587,7 @@ saveRDS(syn_pos_res, "sim-synpos-171011.RDS")
 saveRDS(syn_neg_res, "sim-synneg-171011.RDS")
 
 
-# 2nd investigation: protein-level adjustment -----------------------------
+# Simulation 2a: protein-level adjustment ---------------------------------
 
 nb_sim <- 250
 nb_bch <- 2
@@ -511,7 +614,7 @@ for (b in seq_along(params_dprot)) {
                     cat("param set", idx_res, "out of", nb_paramset, "\n")
                     
                     # Parameters (no shift across batches, no interaction)
-                    bch_effect <- c(0, nb_bch)
+                    bch_effect <- c(0, nb_bch)  # [TODO]: this should be c(0, 0)
                     s_bch <- c(s_bch1, params_s_bch2[s])
                     cnd_bch <- rep(params_dgrp[d], nb_bch)
                     prot_bch <- rep(params_dprot[b], nb_bch)
@@ -537,7 +640,109 @@ prot_res <- bind_rows(prot_res)
 saveRDS(prot_res, "sim-prot-171016.RDS")
 
 
-# Summarize & visualize results for 2nd investigation ---------------------
+
+# Simulation 2b: FDR with protein-level adjustment ------------------------
+
+nb_sim <- 1000
+nb_bch <- 2
+nb_grp <- 2
+s_bch1 <- 0.2
+
+# Parameters
+params_rep <- c(2, 3, 5)  # number of replicates
+params_nst <- c(1, 3, 7)  # number of sites
+params_dgrp <- c(0.5, 0.75, 1)  # change between conditions
+params_pnl <- c(0.5, 0.8)
+
+nb_paramset <- length(params_rep) * length(params_nst) * length(params_dgrp) * length(params_pnl)
+mix_res <- vector("list", nb_paramset)
+
+idx_res <- 1
+set.seed(2017)
+for (p in seq_along(params_pnl)) {
+    p_null <- params_pnl[p]
+    nb_null <- as.integer(nb_sim * p_null)
+    nb_chg <- nb_sim - nb_null
+    
+    for (d in seq_along(params_dgrp)) {
+        for (s in seq_along(params_nst)) {
+            for (r in seq_along(params_rep)) {
+                cat("param set", idx_res, "out of", nb_paramset, "\n")
+                
+                # Parameters (no shift across batches, no interaction)
+                bch_effect <- rep(0, nb_bch)
+                s_bch <- rep(s_bch1, nb_bch)
+                cnd_bch <- rep(params_dgrp[d], nb_bch)
+                cnd_null <- rep(0, nb_bch)
+                prot_bch <- rep(0, nb_bch)
+                
+                # Generate simulation data & evaluate methods
+                protdata_chg <- gen_msites(bch_effect, s_bch, cnd_bch, prot_bch, nb_chg, params_rep[r], params_nst[s])
+                protdata_null <- gen_msites(bch_effect, s_bch, cnd_null, prot_bch, nb_null, params_rep[r], params_nst[s])
+                protdata <- bind_rows(protdata_chg, protdata_null %>% mutate(idx_sim = idx_sim + nb_chg))
+                
+                mix_res[[idx_res]] <- protdata %>% 
+                    alladjtest_sim() %>% 
+                    mutate(
+                        p_null = params_pnl[p], trueLFC = params_dgrp[d], 
+                        nb_rep = params_rep[r], nb_site = params_nst[s]
+                    )
+
+                idx_res <- idx_res + 1
+            }
+        }
+    }
+}
+mix_res <- bind_rows(mix_res)
+
+saveRDS(mix_res, "sim-mix-171031.RDS")
+
+
+# Summarize & visualize results for Simulation 2b -------------------------
+
+mix_res <- mix_res %>% 
+    mutate(is_de = idx_sim <= nb_sim * (1 - p_null)) %>% 
+    group_by(p_null, trueLFC, nb_rep, nb_site, method) %>% 
+    mutate(p_adj = p.adjust(p_val, method = "BH")) %>%
+    ungroup()
+
+summary_mix <- mix_res %>% 
+    group_by(p_null, trueLFC, nb_rep, nb_site, method) %>% 
+    summarise(
+        n_pos = sum(is_de), n_neg = sum(!is_de), n_ppos = sum(p_adj <= 0.05), n_tp = sum(p_adj <= 0.05 & is_de), 
+        n_tn = sum(p_adj > 0.05 & !is_de), n_fp = sum(p_adj <= 0.05 & !is_de)
+    ) %>% 
+    mutate(
+        sens = n_tp / n_pos, spec = n_tn / n_neg, 
+        ppv = n_tp / (n_tp + n_fp), fdr = n_fp / (n_tp + n_fp)
+    ) %>% 
+    ungroup()
+
+
+summary_mix %>% 
+    filter(str_detect(method, "adj")) %>% 
+    mutate(nb_site = ifelse(nb_site == 1, paste(nb_site, "site"), paste(nb_site, "sites"))) %>% 
+    mutate(trueLFC = paste("Log2-FC of", trueLFC)) %>% 
+    ggplot(aes(fdr, sens, color = method, shape = factor(p_null))) + 
+    geom_point(aes(size = factor(nb_rep)), alpha = 0.8) + 
+    geom_vline(xintercept = 0.05) + 
+    facet_grid(trueLFC ~ nb_site) + 
+    labs(title = "Proposed methods with protein-level adjustment were able to controll FDR across various cases", x = "FDR", y = "Power") +
+    theme(legend.position = "bottom", legend.box = "horizontal")
+ggsave("prot_fdr.png", width = 9, height = 6)
+
+
+mix_res %>% 
+    filter(p_null == 0.5) %>% 
+    filter(nb_site == 3) %>% 
+    filter(method == "Proposed (adj. per-batch)") %>% 
+    ggplot(aes(p_val, fill = (is_de), color = (is_de))) + 
+    geom_histogram(binwidth = 0.025) + 
+    geom_vline(xintercept = 0.05) + 
+    facet_grid(trueLFC ~ nb_rep)
+
+
+# Summarize & visualize results for Simulation 2a -------------------------
 
 prot_res %>% 
     filter(protLFC == 0, trueLFC == 0)
@@ -610,7 +815,7 @@ alt_res %>%
 ggsave("prot_pwr.png", width = 9, height = 6)
 
 
-# Summarize & visualize results for 1st investigation ---------------------
+# Summarize & visualize results for Simulation 1 --------------------------
 
 sim_res <- readRDS("sim-synnull-171011.RDS")
 sim_res <- readRDS("sim-synpos-171011.RDS")
