@@ -848,7 +848,7 @@ sim_res %>%
     geom_boxplot(position = position_dodge(0.75)) + 
     geom_hline(yintercept = 0) + 
     facet_grid(str_lfc ~ bch_lvl + bch_sd) + 
-    labs(x = "Method", y = "Estimation error", subtitle = "No synergy, 2 conditions", 
+    labs(x = "Method", y = "Estimation error", subtitle = "No batch-condition interaction, 2 conditions", 
          title = "Estimation based on most significant batch with t-test was biased") + 
     theme(legend.position = "bottom", legend.box = "horizontal")
 ggsave("synnull_est_2.png", width = 9, height = 6)
@@ -866,7 +866,7 @@ null_res %>%
     geom_point(alpha = 0.7) + 
     facet_grid(str_grp ~ bch_lvl + bch_sd) + 
     geom_hline(yintercept = 0.05, linetype = "dashed") + 
-    labs(x = "Method", y = "FPR", subtitle = "No synergy", 
+    labs(x = "Method", y = "FPR", subtitle = "No batch-condition interaction", 
          title = "Proposed per-batch model better calibrated Type I error rate") + 
     theme(axis.text.x = element_blank(), legend.position = "bottom", legend.box = "horizontal")
 ggsave("synnull_fpr.png", width = 9, height = 6)
@@ -881,10 +881,10 @@ alt_res <- alt_res %>%
         str_grp = paste0(nb_grp, " conditions")
     )
 
-nrep <- 2
-# sttl <- paste0("No synergy, ", nrep, " replicates")
-# sttl <- paste0("Positive synergy, ", nrep, " replicates")
-sttl <- paste0("Negative synergy, ", nrep, " replicates")
+nrep <- 5
+sttl <- paste0("No batch-condition interaction, ", nrep, " replicates")
+# sttl <- paste0("Positive batch-condition interaction, ", nrep, " replicates")
+# sttl <- paste0("Negative batch-condition interaction, ", nrep, " replicates")
 alt_res %>% 
     filter(nb_rep == nrep) %>% 
     ggplot(aes(trueLFC, power, group = method, color = method)) + 
@@ -895,8 +895,8 @@ alt_res %>%
     labs(title = "Proposed models improved power", x = "Log (base 2) fold change", y = "Power", subtitle = sttl) +
     # labs(title = "Ignoring batch effects lost power", x = "Log (base 2) fold change", y = "Power", subtitle = sttl) +
     theme(legend.position = "bottom", legend.box = "horizontal")
-# ggsave(paste0("synnull_pwr_", nrep,".png"), width = 9, height = 6)
+ggsave(paste0("synnull_pwr_", nrep,".png"), width = 9, height = 6)
 # ggsave(paste0("synpos_pwr_", nrep,".png"), width = 9, height = 6)
-ggsave(paste0("synneg_pwr_", nrep,".png"), width = 9, height = 6)
+# ggsave(paste0("synneg_pwr_", nrep,".png"), width = 9, height = 6)
 
 
