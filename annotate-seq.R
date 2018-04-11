@@ -28,18 +28,19 @@ hs_fasta <- hs_fasta %>%
         p_entry = str_extract(header, pattern = "([^\\s\\|]*)(?=\\s)")
     )
 
-# define modification residues and symbols
-mod_residue <- "K"
-mod_symbol <- "\\*"
-
-# [TODO]: seems no need to export mod_bdy
-hs_fasta <- hs_fasta %>% 
-    mutate(
-        mod_bdy = str_locate_all(sequence, mod_residue), 
-        mod_idx = map(mod_bdy, ~.[, "start"]), 
-        mod_res = str_match_all(sequence, mod_residue), 
-        mod_res = map(mod_res, ~.[, 1])
-    )
-
 # save.image("output/uniprot_inf.RData")
 
+
+# [TODO]: the following steps more suitable to be processed for different datasets
+# define modification residues and symbols
+# mod_residue <- "K"
+# mod_symbol <- "\\*"
+# 
+# [TODO]: seems no need to export mod_bdy
+# hs_fasta <- hs_fasta %>% 
+#     mutate(
+#         mod_bdy = str_locate_all(sequence, mod_residue), 
+#         mod_idx = map(mod_bdy, ~.[, "start"]), 
+#         mod_res = str_match_all(sequence, mod_residue), 
+#         mod_res = map(mod_res, ~.[, 1])
+#     )
