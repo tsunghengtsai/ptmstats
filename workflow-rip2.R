@@ -5,7 +5,8 @@ library(stringr)
 library(broom)
 library(survival)
 
-source("utilities2.R")
+library(devtools)
+load_all(pkg = "~/Projects/MSstatsPTM/")
 
 
 # Prepare data set --------------------------------------------------------
@@ -85,7 +86,6 @@ df_design <- tbl_df(df_design) %>%
         subj = plyr::mapvalues(id_subject, from = subj_uniq, to = subj_key), 
         biorep = plyr::mapvalues(ann_bioreplicate, from = bio_uniq, to = bio_key), 
         batch = ifelse(biorep == "B1", "BCH1", "BCH2"), 
-        # batch = plyr::mapvalues(ann_objective_id, from = obj_uniq, to = bch_key), 
         techrep = str_c("T", id_injectionset), 
         run_bt = str_c(biorep, techrep), 
         run_cbt = str_c(group, run_bt, sep = "-")
@@ -170,14 +170,16 @@ df_fasmod <- df_mod %>%
     mutate(nb_mch = map_int(peptide_idx, ~ nrow(.)))
 
 # Ignoring non-specific matching (peptide mapped to 0 or >1 locations of protein)
-df_fasmod <- df_fasmod %>% filter(nb_mch == 1)
+df_fasmod <- df_fasmod %>% 
+    filter(nb_mch == 1) %>% 
+    mutate(aa_start = map_int(peptide_idx, ~.[, "start"]))
 
 # Observed modification sites
 mod_resymb <- str_c(mod_residue, mod_symbol)
 df_fasmod <- df_fasmod %>% 
     mutate(
-        site_all = map2(peptide_unmod_trimmed, peptide_idx, locate_site, mod_residue), 
-        site_mod = map2(peptide_trimmed, peptide_idx, locate_mod, mod_resymb)
+        site_all = map2(peptide_unmod_trimmed, aa_start, locate_site, mod_residue), 
+        site_mod = map2(peptide_trimmed, aa_start, locate_mod, mod_resymb)
     ) %>% 
     mutate(
         nb_site = map_int(site_all, length), 
@@ -267,7 +269,7 @@ df_work <- normalize_ptm(df_work)
 
 # Annotation for either site-level analysis or protein-level analysis
 if (!site_spec) {
-    df_work <- df_work %>% mutate(site_str = ifelse(site_str == "UNMOD", "UNMOD", "MOD"))
+    df_work <- df_work %>% mutate(site_str = ifelse(site_str == "None", "None", "MOD"))
 }
 
 # Fully observed sites (in at least one conditions)
@@ -282,7 +284,7 @@ site_full <- df_work %>%
 if (only_protadj) {
     site_full <- site_full %>% 
         group_by(uniprot_iso) %>% 
-        filter(n_distinct(site_str == "UNMOD") == 2) %>% 
+        filter(n_distinct(site_str == "None") == 2) %>% 
         ungroup()
 }
 
@@ -345,39 +347,49 @@ for (i in seq_along(cases)) {
     grp_ctrl <- controls[i]
     grp_case <- cases[i]
     # Per-batch model
-    test_1[[i]] <- compare_mod(param_perbch, grp_ctrl, grp_case, protadj = FALSE) %>% mutate(hyp = "null1")
-    test_2[[i]] <- compare_mod(param_perbch, grp_ctrl, grp_case, protadj = TRUE) %>% mutate(hyp = "null2")
+    test_1[[i]] <- compare_mod(param_perbch, grp_ctrl, grp_case, protadj = FALSE) %>% 
+        # mutate(hyp = "null1") %>% 
+        mutate(model = "per-batch", protadj = "no adjustment")
+    test_2[[i]] <- compare_mod(param_perbch, grp_ctrl, grp_case, protadj = TRUE) %>% 
+        # mutate(hyp = "null2") %>% 
+        mutate(model = "per-batch", protadj = "protein adjustment")
     # All-batch model
-    test_3[[i]] <- compare_mod(param_allbch, grp_ctrl, grp_case, protadj = FALSE) %>% mutate(hyp = "null3")
-    test_4[[i]] <- compare_mod(param_allbch, grp_ctrl, grp_case, protadj = TRUE) %>% mutate(hyp = "null4")
+    test_3[[i]] <- compare_mod(param_allbch, grp_ctrl, grp_case, protadj = FALSE) %>% 
+        # mutate(hyp = "null3") %>% 
+        mutate(model = "all-batch", protadj = "no adjustment")
+    test_4[[i]] <- compare_mod(param_allbch, grp_ctrl, grp_case, protadj = TRUE) %>% 
+        # mutate(hyp = "null4") %>% 
+        mutate(model = "all-batch", protadj = "protein adjustment")
     
     # Append unadjustable results (EXPERIMENTAL)
     test_2[[i]] <- bind_rows(
         test_2[[i]], 
         test_1[[i]] %>% 
             anti_join(test_2[[i]] %>% select(protsite)) %>% 
-            mutate(hyp = "null2")
+            # mutate(hyp = "null2") %>% 
+            mutate(model = "per-batch", protadj = "protein adjustment")
     )
     test_4[[i]] <- bind_rows(
         test_4[[i]], 
         test_3[[i]] %>% 
             anti_join(test_4[[i]] %>% select(protsite)) %>% 
-            mutate(hyp = "null4")
+            # mutate(hyp = "null4") %>% 
+            mutate(model = "all-batch", protadj = "protein adjustment")
     )
 
 } 
 
 test_res <- bind_rows(test_1, test_2, test_3, test_4) %>% 
-    group_by(hyp) %>%
+    group_by(model, protadj) %>%
     mutate(p_adjusted = p.adjust(p_value, method = "BH")) %>% 
     ungroup()
 test_res$p_adjusted[test_res$log2FC %in% c(Inf, -Inf)] <- 0  # Missing in one group
 
-test_res <- test_res %>% 
-    mutate(
-        model = ifelse(hyp %in% c("null1", "null2"), "per-batch", "all-batch"), 
-        protadj = ifelse(hyp %in% c("null2", "null4"), "protein adjustment", "no adjustment")
-    )
+# test_res <- test_res %>% 
+#     mutate(
+#         model = ifelse(hyp %in% c("null1", "null2"), "per-batch", "all-batch"), 
+#         protadj = ifelse(hyp %in% c("null2", "null4"), "protein adjustment", "no adjustment")
+#     )
 
 
 # Site-level results ------------------------------------------------------
@@ -395,10 +407,7 @@ test_res %>%
     geom_hline(yintercept = -log10(0.05), color = "darkred") + 
     geom_vline(xintercept = c(2, -2), color = "darkred", linetype = "dashed") + 
     facet_grid(model ~ protadj, scales = "free_y")
-ggsave("rip2_volcanos.png", width = 16, height = 8)
-
-# facet_grid(model + protadj ~ contrast, scales = "free_y")
-# facet_grid(model + protadj ~ contrast)
+# ggsave("rip2_volcanos.png", width = 16, height = 8)
 
 test_res_prop <- test_res %>% 
     # filter(model == "per-batch", protadj == "protein adjustment") %>%
@@ -421,15 +430,14 @@ test_res_prop %>%
         limits = c("nonsig", "dnreg", "upreg"), 
         labels = c("No significant change", "Down regulation", "Up regulation")
     ) + 
-    geom_text_repel(
-        data = filter(test_res_prop, !is.na(p_value), p_adjusted < 0.05, abs(log2FC) > 2),
-        aes(label = protsite2)
-    ) +
     # geom_text_repel(
-    #     data = filter(test_res_prop, !is.na(p_value),
-    #                   str_detect(entry_name, "RIPK2") | str_detect(entry_name, "IKBE") | str_detect(entry_name, "NFKB1")),
-    #     aes(label = protsite2), color = "black"
+    #     data = filter(test_res_prop, !is.na(p_value), p_adjusted < 0.05, abs(log2FC) > 2),
+    #     aes(label = protsite2)
     # ) +
+    geom_text_repel(
+        data = filter(test_res_prop, !is.na(p_value), str_detect(entry_name, "RIPK2|IKBE|NFKB1")),
+        aes(label = protsite2), color = "black"
+    ) +
     labs(x = "log (base 2) FC", y = "-log (base 10) adjusted p-value", color = "", 
          title = str_c(test_res_prop$contrast[1], " (", test_res_prop$model[1], ")")) + 
     theme(legend.position = "bottom", legend.box = "horizontal")
@@ -446,40 +454,29 @@ test_res %>%
     facet_grid(model + protadj ~ ., scales = "free_y")
 
 
-
-
 # Evaluate modeling strategies --------------------------------------------
 
-test_perbch <- test_res %>% 
-    filter(model == "per-batch")
+test_allbch <- test_res %>% 
+    filter(model == "all-batch")
 
-test_perbch_pair <- test_perbch %>% 
-    select(protsite, hyp, p_adjusted) %>% 
-    spread(hyp, p_adjusted)
+test_allbch_pair <- test_allbch %>% 
+    select(protsite, protadj, p_adjusted) %>% 
+    spread(protadj, p_adjusted)
 
-# test_perbch_pair %>% 
-#     filter(null1 < 0.05, null2 < 0.05)
-# test_perbch_pair %>% 
-#     filter(null1 < 0.05, null2 > 0.05)
-# test_perbch_pair %>% 
-#     filter(null1 > 0.05, null2 < 0.05)
-
-sig_null <- test_perbch_pair %>% 
-    filter(null1 < 0.05, null2 > 0.05) %>% 
+sig_null <- test_allbch_pair %>% 
+    filter(`no adjustment` < 0.05, `protein adjustment` > 0.05) %>% 
     separate(protsite, into = c("protein", "site"), sep = "--")
-sig_adj <- test_perbch_pair %>% 
-    filter(null1 > 0.05, null2 < 0.05) %>% 
+sig_adj <- test_allbch_pair %>% 
+    filter(`no adjustment` > 0.05, `protein adjustment` < 0.05) %>% 
     separate(protsite, into = c("protein", "site"), sep = "--")
-sig_both <- test_perbch_pair %>% 
-    filter(null1 < 0.05, null2 < 0.05) %>% 
+sig_both <- test_allbch_pair %>% 
+    filter(`no adjustment` < 0.05, `protein adjustment` < 0.05) %>% 
     separate(protsite, into = c("protein", "site"), sep = "--")
 
-
-runlvl_bat <- c(
-    "Ctrl-B1T1", "Ctrl-B1T2", "USP30_OE-B1T1", "USP30_OE-B1T2", 
-    "CCCP-B1T1", "CCCP-B1T2", "Combo-B1T1", "Combo-B1T2", 
-    "Ctrl-B2T1", "Ctrl-B2T2", "USP30_OE-B2T1", "USP30_OE-B2T2", 
-    "CCCP-B2T1", "CCCP-B2T2", "Combo-B2T1", "Combo-B2T2"
+runlvl_bat <- str_c(
+    rep(rep(c("ctrl", "mdp_30", "mdp_60", "cmpd89", "cmpd89_mdp_30", "cmpd89_mdp_60"), each = 2), 2), 
+    c(rep(c("B1T1", "B1T2"), 6), rep(c("B2T1", "B2T2"), 6)), 
+    sep = "-"
 )
 
 unnested_site <- nested_site %>% unnest(aftdata) 
@@ -487,15 +484,14 @@ unnested_site <- nested_site %>% unnest(aftdata)
 subset_site <- function(df_full, test_ex) {
     df_sub <- df_full %>%
         semi_join(test_ex %>% select(uniprot_iso, site_str)) %>%
-        bind_rows(df_full %>% filter(site_str == "UNMOD", uniprot_iso %in% test_ex$uniprot_iso)) %>%
+        bind_rows(df_full %>% filter(site_str == "None", uniprot_iso %in% test_ex$uniprot_iso)) %>%
         mutate(is_mod = str_detect(feature, "\\*"))
     
     return(df_sub)
 }
 sub_perbch <- subset_site(
     unnested_site, 
-    test_perbch %>% separate(protsite, into = c("uniprot_iso", "site_str"))
-    # test_perbch %>% filter(hyp == "null2") %>% separate(protsite, into = c("uniprot_iso", "site_str"))
+    test_allbch %>% separate(protsite, into = c("uniprot_iso", "site_str"))
 )
 
 plot_sprofile <- function(df_allprot, protein, run_level) {
@@ -515,7 +511,7 @@ plot_sprofile <- function(df_allprot, protein, run_level) {
         geom_line(alpha = 0.75) + 
         geom_line(data = filter(df_fill, !is_mod), aes(run_fac, log2inty, group = feature), colour = "gray") + 
         geom_point(data = filter(df_fill, !is_mod), aes(run_fac, log2inty), colour = "gray", size = 2) + 
-        geom_vline(xintercept = 8.5) + 
+        geom_vline(xintercept = 12.5) + 
         facet_grid(is_mod_fac ~ .) + 
         coord_cartesian(ylim = c(10, 35)) + 
         labs(x = "Run", y = "Log2-intensity", title = protein) + 
@@ -526,11 +522,11 @@ plot_sprofile <- function(df_allprot, protein, run_level) {
 }
 
 # subprot <- sort(unique(sig_adj$protein))
-# pdf("profile_usp30_adj.pdf")
+# pdf("profile_rip2_adj.pdf")
 # subprot <- sort(unique(sig_null$protein))
-# pdf("profile_usp30_null.pdf")
+# pdf("profile_rip2_null.pdf")
 subprot <- sort(unique(sig_both$protein))
-pdf("profile_usp30_both.pdf")
+pdf("profile_rip2_both.pdf")
 for (i in seq_along(subprot)) {
     print(plot_sprofile(sub_perbch, subprot[i], runlvl_bat))
 }
@@ -538,42 +534,31 @@ dev.off()
 
 
 # Significant site changes ------------------------------------------------
-test_res_sig <- test_res %>% 
-    filter(p_adjusted < 0.05) %>% 
-    separate(protsite, into = c("uniprot_iso", "site_str"), sep = "--", remove = FALSE) %>% 
-    select(protsite, uniprot_iso, site_str, contrast, log2FC, std_error, DF, statistic, p_value, p_adjusted, hyp, model, protadj)
 
-test_res_sig %>% count(contrast, hyp)
-
-test_resfair_sig <- test_res %>% 
-    group_by(protsite, contrast) %>% filter(n() == 4) %>% ungroup() %>% 
-    filter(p_adjusted < 0.05) %>% 
-    separate(protsite, into = c("uniprot_iso", "site_str"), sep = "--", remove = FALSE) %>% 
-    select(protsite, uniprot_iso, site_str, contrast, log2FC, std_error, DF, statistic, p_value, p_adjusted, hyp, model, protadj)
-
-test_resfair_sig %>% count(contrast, hyp)
-
-# write_csv(test_res_sig, "output/usp30-full.csv")
-
-
-w1 <- test_res %>% 
-    filter(hyp == "null1") %>% 
-    select(protsite, contrast, log2FC_1 = log2FC, p_value_1 = p_value, p_adj_1 = p_adjusted)
-w2 <- test_res %>% 
-    filter(hyp == "null2") %>% 
-    select(protsite, contrast, log2FC_2 = log2FC, p_value_2 = p_value, p_adj_2 = p_adjusted)
-w3 <- test_res %>% 
-    filter(hyp == "null3") %>% 
-    select(protsite, contrast, log2FC_3 = log2FC, p_value_3 = p_value, p_adj_3 = p_adjusted)
-w4 <- test_res %>% 
-    filter(hyp == "null4") %>% 
-    select(protsite, contrast, log2FC_4 = log2FC, p_value_4 = p_value, p_adj_4 = p_adjusted)
-wfull <- w1 %>% full_join(w2) %>% full_join(w3) %>% full_join(w4) %>% 
-    separate(protsite, into = c("protein", "site"), sep = "--")
+test_res <- test_res %>% 
+    mutate(protsite = str_replace(protsite, "--", " (") %>% str_c(")")) %>%
+    select(protsite, contrast, log2FC, std_error, DF, statistic, p_value, p_adjusted, model, protadj)
 
 if (site_spec) {
-    write_csv(wfull, "output/usp30-tmp-4mdl.csv")
+    write_csv(test_res, "output/rip2-tmp-4mdl.csv")
 } else {
-    write_csv(wfull, "output/usp30-tmp-4mdl-prot.csv")
+    write_csv(test_res, "output/rip2-tmp-4mdl-prot.csv")
 }
+
+
+test_res_sig <- test_res %>% 
+    filter(p_adjusted < 0.05, !is.na(p_value)) %>% 
+    filter(abs(log2FC) >= 2)
+
+test_res_sig %>% count(contrast, model, protadj)
+
+# test_resfair_sig <- test_res %>% 
+#     group_by(protsite, contrast) %>% filter(n() == 4) %>% ungroup() %>% 
+#     filter(p_adjusted < 0.05) %>% 
+#     separate(protsite, into = c("uniprot_iso", "site_str"), sep = "--", remove = FALSE) %>% 
+#     select(protsite, uniprot_iso, site_str, contrast, log2FC, std_error, DF, statistic, p_value, p_adjusted, model, protadj)
+# 
+# test_resfair_sig %>% count(contrast, model, protadj)
+
+# write_csv(test_res_sig, "output/usp30-full.csv")
 
