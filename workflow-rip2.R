@@ -178,18 +178,20 @@ df_fasmod <- df_fasmod %>%
 mod_resymb <- str_c(mod_residue, mod_symbol)
 df_fasmod <- df_fasmod %>% 
     mutate(
-        site_all = map2(peptide_unmod_trimmed, aa_start, locate_site, mod_residue), 
-        site_mod = map2(peptide_trimmed, aa_start, locate_mod, mod_resymb)
+        idx_site = pmap(list(peptide_unmod_trimmed, aa_start, mod_residue), locate_site), 
+        idx_mod = pmap(list(peptide_trimmed, aa_start, mod_resymb), locate_mod)
     ) %>% 
     mutate(
-        nb_site = map_int(site_all, length), 
-        nb_mod = map_int(site_mod, length), 
-        site_str = map2_chr(site_mod, mod_idx, annotate_site, mod_residue), 
+        nb_site = map_int(idx_site, length), 
+        nb_mod = map_int(idx_mod, length), 
+        len_site = map(mod_idx, ~str_length(.[length(.)])), 
+        site = pmap_chr(list(idx_mod, mod_residue, len_site), annot_site), 
+        # site = map2_chr(idx_mod, mod_idx, annotate_site, mod_residue), 
         peptide_str = map_chr(peptide_idx, ~ str_c(., collapse = "-")), 
-        full_site_str = str_c(uniprot_iso, peptide_str, site_str, sep = "_")
+        full_site_str = str_c(uniprot_iso, peptide_str, site, sep = "_")
     ) %>% 
     select(uniprot_iso, peptide, peptide_unmod, nb_site, nb_mod, is_mod, 
-           site_all, site_mod, site_str, peptide_str, full_site_str)
+           idx_site, idx_mod, site, peptide_str, full_site_str)
 
 # Check if unmodified peptides have a site modified elsewhere
 # Firstly, find protein with at least one unmodified peptide/site (to be checked)
@@ -200,16 +202,16 @@ nested_w_unmod <- df_fasmod %>%
 # Secondly, compare the unmodified peptides with modified sites
 nested_w_unmod <- nested_w_unmod %>% 
     mutate(unmod_data = map(data, ~filter(., !is_mod))) %>% 
-    mutate(site_mod_prot = map(data, ~unlist(.$site_mod))) %>% 
-    mutate(unmod_data = map2(unmod_data, site_mod_prot, ~mutate(.x, w_mod = site_all %in% .y)))
+    mutate(site_mod_prot = map(data, ~unlist(.$idx_mod))) %>% 
+    mutate(unmod_data = map2(unmod_data, site_mod_prot, ~mutate(.x, w_mod = idx_site %in% .y)))
 
 # Restrict on peptides modified on 1 site and unmodified peptides with no site modified elsewhere
 # (Another option) Restrict on peptides modified on 1 site and unmodified peptides with no site
 df_unconfound <- bind_rows(
     nested_w_unmod %>% unnest(unmod_data) %>% filter(!w_mod) %>% 
-        select(uniprot_iso, peptide, is_mod, site_str), 
+        select(uniprot_iso, peptide, is_mod, site), 
     df_fasmod %>% filter(nb_mod == 1) %>% 
-        select(uniprot_iso, peptide, is_mod, site_str)
+        select(uniprot_iso, peptide, is_mod, site)
 )
 
 # Proteins eligible for protein-level adjustment
@@ -220,8 +222,10 @@ if (only_protadj) {
         ungroup()
 }
 
-df_work <- df_work %>% inner_join(df_unconfound)
-
+# df_work <- df_work %>% inner_join(df_unconfound)
+df_work <- df_work %>% 
+    inner_join(df_unconfound) %>% 
+    rename(protein = uniprot_iso)
 
 # Visualization -----------------------------------------------------------
 
@@ -269,22 +273,22 @@ df_work <- normalize_ptm(df_work)
 
 # Annotation for either site-level analysis or protein-level analysis
 if (!site_spec) {
-    df_work <- df_work %>% mutate(site_str = ifelse(site_str == "None", "None", "MOD"))
+    df_work <- df_work %>% mutate(site = ifelse(site == "None", "None", "MOD"))
 }
 
 # Fully observed sites (in at least one conditions)
 site_full <- df_work %>%
-    group_by(uniprot_iso, site_str, group) %>%
+    group_by(protein, site, group) %>%
     summarise(nb_run = n_distinct(run)) %>%
     ungroup() %>%
     left_join(df_design %>% group_by(group) %>% summarise(nb_run_design = n())) %>% 
     filter(nb_run == nb_run_design) %>% 
-    distinct(uniprot_iso, site_str)
+    distinct(protein, site)
 
 if (only_protadj) {
     site_full <- site_full %>% 
-        group_by(uniprot_iso) %>% 
-        filter(n_distinct(site_str == "None") == 2) %>% 
+        group_by(protein) %>% 
+        filter(n_distinct(site == "None") == 2) %>% 
         ungroup()
 }
 
@@ -296,11 +300,11 @@ df_site <- df_work %>%
 
 if ("batch" %in% names(df_site)) {
     nested_site <- df_site %>%
-        group_by(uniprot_iso, site_str, batch) %>%
+        group_by(protein, site, batch) %>%
         nest()
 } else {
     nested_site <- df_site %>%
-        group_by(uniprot_iso, site_str) %>%
+        group_by(protein, site) %>%
         nest()
 }
 
@@ -365,14 +369,14 @@ for (i in seq_along(cases)) {
     test_2[[i]] <- bind_rows(
         test_2[[i]], 
         test_1[[i]] %>% 
-            anti_join(test_2[[i]] %>% select(protsite)) %>% 
+            anti_join(test_2[[i]] %>% select(protein, site)) %>% 
             # mutate(hyp = "null2") %>% 
             mutate(model = "per-batch", protadj = "protein adjustment")
     )
     test_4[[i]] <- bind_rows(
         test_4[[i]], 
         test_3[[i]] %>% 
-            anti_join(test_4[[i]] %>% select(protsite)) %>% 
+            anti_join(test_4[[i]] %>% select(protein, site)) %>% 
             # mutate(hyp = "null4") %>% 
             mutate(model = "all-batch", protadj = "protein adjustment")
     )
@@ -398,7 +402,7 @@ library(ggrepel)
 
 # Volcano plot
 test_res %>% 
-    group_by(protsite, contrast) %>% filter(n() == 4) %>% ungroup() %>% 
+    group_by(protein, site, contrast) %>% filter(n() == 4) %>% ungroup() %>% 
     filter(abs(log2FC) < Inf) %>%
     ggplot(aes(log2FC, -log10(p_adjusted))) + 
     geom_point(color = "darkgray") + 
@@ -417,8 +421,8 @@ test_res_prop <- test_res %>%
     )
 
 test_res_prop <- test_res_prop %>% 
-    separate(protsite, c("uniprot_iso", "site"), sep = "--", remove = FALSE) %>% 
-    left_join(hs_fasta %>% distinct(uniprot_iso, entry_name)) %>% 
+    # separate(protsite, c("protein", "site"), sep = "--", remove = FALSE) %>% 
+    left_join(hs_fasta %>% distinct(uniprot_iso, entry_name) %>% rename(protein = uniprot_iso)) %>% 
     mutate(protsite2 = str_c(entry_name, " (", site, ")"))
 
 test_res_prop %>% 
@@ -448,7 +452,7 @@ test_res_prop %>%
 
 # Histogram of p-values
 test_res %>% 
-    group_by(protsite, contrast) %>% filter(n() == 4) %>% ungroup() %>% 
+    group_by(protein, site, contrast) %>% filter(n() == 4) %>% ungroup() %>% 
     ggplot(aes((p_value))) + 
     geom_histogram(binwidth = 0.01) + 
     facet_grid(model + protadj ~ ., scales = "free_y")
@@ -483,21 +487,21 @@ unnested_site <- nested_site %>% unnest(aftdata)
 # unnested_site <- nested_site %>% unnest(aftdata) %>% filter(is_mod)
 subset_site <- function(df_full, test_ex) {
     df_sub <- df_full %>%
-        semi_join(test_ex %>% select(uniprot_iso, site_str)) %>%
-        bind_rows(df_full %>% filter(site_str == "None", uniprot_iso %in% test_ex$uniprot_iso)) %>%
+        semi_join(test_ex %>% select(protein, site)) %>%
+        bind_rows(df_full %>% filter(site == "None", protein %in% test_ex$protein)) %>%
         mutate(is_mod = str_detect(feature, "\\*"))
     
     return(df_sub)
 }
 sub_perbch <- subset_site(
     unnested_site, 
-    test_allbch %>% separate(protsite, into = c("uniprot_iso", "site_str"))
+    test_allbch %>% separate(protsite, into = c("protein", "site"))
 )
 
 plot_sprofile <- function(df_allprot, protein, run_level) {
-    df_prot <- df_allprot %>% filter(uniprot_iso == protein) 
+    df_prot <- df_allprot %>% filter(protein == protein) 
     # Complete possible combinations of peptide features and runs
-    mpar <- df_prot %>% distinct(site_str, feature, is_mod)
+    mpar <- df_prot %>% distinct(site, feature, is_mod)
     df_fill <- df_prot %>% 
         select(feature, run, log2inty) %>% 
         complete(run = run_level, feature) %>% 
@@ -506,7 +510,7 @@ plot_sprofile <- function(df_allprot, protein, run_level) {
                run_fac = factor(run, levels = run_level))
     # Feature profiles categorized by modification and matching status
     filter(df_fill, is_mod) %>% 
-        ggplot(aes(run_fac, log2inty, group = feature, colour = site_str)) + 
+        ggplot(aes(run_fac, log2inty, group = feature, colour = site)) + 
         geom_point(size = 2, alpha = 0.5) +
         geom_line(alpha = 0.75) + 
         geom_line(data = filter(df_fill, !is_mod), aes(run_fac, log2inty, group = feature), colour = "gray") + 
@@ -555,8 +559,8 @@ test_res_sig %>% count(contrast, model, protadj)
 # test_resfair_sig <- test_res %>% 
 #     group_by(protsite, contrast) %>% filter(n() == 4) %>% ungroup() %>% 
 #     filter(p_adjusted < 0.05) %>% 
-#     separate(protsite, into = c("uniprot_iso", "site_str"), sep = "--", remove = FALSE) %>% 
-#     select(protsite, uniprot_iso, site_str, contrast, log2FC, std_error, DF, statistic, p_value, p_adjusted, model, protadj)
+#     separate(protsite, into = c("protein", "site"), sep = "--", remove = FALSE) %>% 
+#     select(protsite, protein, site, contrast, log2FC, std_error, DF, statistic, p_value, p_adjusted, model, protadj)
 # 
 # test_resfair_sig %>% count(contrast, model, protadj)
 
