@@ -64,11 +64,6 @@ df_work <- df_work %>%
            -peptide_miscleavages, -peptide_validity) %>% 
     rename(peptide = peptide_sequence)
 
-df_work <- df_work %>% 
-    rename(entry_name = Reference) %>% 
-    left_join(readRDS("output/hs_fasta_20160725.rds") %>% distinct(uniprot_ac, entry_name)) %>% 
-    rename(uniprot_iso = uniprot_ac)
-
 # Group information is organized in slightly different ways across GNE datasets
 df_design <- df_design %>% 
     mutate(group = str_replace_all(
@@ -93,6 +88,14 @@ df_design <- tbl_df(df_design) %>%
 
 
 # Annotation & data filtering ---------------------------------------------
+
+# Read fasta annotation
+hs_fasta <- tidy_fasta("data/Sequence/homo_sapiens_all_20160725.fasta")
+
+df_work <- df_work %>% 
+    rename(entry_name = Reference) %>% 
+    left_join(hs_fasta %>% distinct(uniprot_ac, entry_name)) %>% 
+    rename(uniprot_iso = uniprot_ac)
 
 df_work <- df_work %>% 
     mutate(
@@ -127,23 +130,30 @@ df_work <- df_work %>%
 
 # Site representation for modified peptides -------------------------------
 
-# Read fasta annotation
-hs_fasta <- readRDS("output/hs_fasta_20160725.rds")  # By annotate-fasta.R
-
 # Annotate potential modification sites on protein sequences
 hs_fasta <- hs_fasta %>% 
     mutate(
-        mod_range = str_locate_all(sequence, mod_residue), 
-        mod_res = str_match_all(sequence, mod_residue)
+        rng_site_all = str_locate_all(sequence, mod_residue), 
+        idx_site_all = map(rng_site_all, ~.[, "start"]), 
+        aa_site_all = str_match_all(sequence, mod_residue), 
+        aa_site_all = map(aa_site_all, ~.[, 1])
     ) %>% 
-    mutate(
-        mod_idx = map(mod_range, ~.[, "start"]), 
-        mod_res = map(mod_res, ~.[, 1])
-    )
-
-hs_fasta <- hs_fasta %>% 
-    select(uniprot_ac, uniprot_iso, entry_name, mod_idx, mod_res, header, sequence) %>% 
+    select(uniprot_ac, uniprot_iso, entry_name, idx_site_all, aa_site_all, header, sequence) %>% 
     arrange(uniprot_iso)
+
+# hs_fasta <- hs_fasta %>% 
+#     mutate(
+#         rng_site_all = str_locate_all(sequence, mod_residue), 
+#         aa_site_all = str_match_all(sequence, mod_residue)
+#     ) %>% 
+#     mutate(
+#         idx_site_all = map(rng_site_all, ~.[, "start"]), 
+#         aa_site_all = map(aa_site_all, ~.[, 1])
+#     )
+# 
+# hs_fasta <- hs_fasta %>% 
+#     select(uniprot_ac, uniprot_iso, entry_name, idx_site_all, aa_site_all, header, sequence) %>% 
+#     arrange(uniprot_iso)
 
 # Observed peptide sequence & other information
 df_mod <- df_work %>% 
@@ -165,14 +175,14 @@ df_mod <- df_mod %>%
 # Integrate fasta information with observed peptides
 # [TODO]: use extended AAs for more specific matching
 df_fasmod <- df_mod %>% 
-    inner_join(hs_fasta %>% select(uniprot_iso, sequence, mod_idx)) %>% 
-    mutate(peptide_idx = str_locate_all(sequence, peptide_unmod_trimmed)) %>% 
-    mutate(nb_mch = map_int(peptide_idx, ~ nrow(.)))
+    inner_join(hs_fasta %>% select(uniprot_iso, sequence, idx_site_all)) %>% 
+    mutate(rng_peptide = str_locate_all(sequence, peptide_unmod_trimmed)) %>% 
+    mutate(nb_mch = map_int(rng_peptide, ~ nrow(.)))
 
 # Ignoring non-specific matching (peptide mapped to 0 or >1 locations of protein)
 df_fasmod <- df_fasmod %>% 
     filter(nb_mch == 1) %>% 
-    mutate(aa_start = map_int(peptide_idx, ~.[, "start"]))
+    mutate(aa_start = map_int(rng_peptide, ~.[, "start"]))
 
 # Observed modification sites
 mod_resymb <- str_c(mod_residue, mod_symbol)
@@ -184,10 +194,10 @@ df_fasmod <- df_fasmod %>%
     mutate(
         nb_site = map_int(idx_site, length), 
         nb_mod = map_int(idx_mod, length), 
-        len_site = map(mod_idx, ~str_length(.[length(.)])), 
+        len_site = map(idx_site_all, ~str_length(.[length(.)])), 
         site = pmap_chr(list(idx_mod, mod_residue, len_site), annot_site), 
-        # site = map2_chr(idx_mod, mod_idx, annotate_site, mod_residue), 
-        peptide_str = map_chr(peptide_idx, ~ str_c(., collapse = "-")), 
+        # site = map2_chr(idx_mod, idx_site_all, annotate_site, mod_residue), 
+        peptide_str = map_chr(rng_peptide, ~ str_c(., collapse = "-")), 
         full_site_str = str_c(uniprot_iso, peptide_str, site, sep = "_")
     ) %>% 
     select(uniprot_iso, peptide, peptide_unmod, nb_site, nb_mod, is_mod, 
@@ -215,12 +225,12 @@ df_unconfound <- bind_rows(
 )
 
 # Proteins eligible for protein-level adjustment
-if (only_protadj) {
-    df_unconfound <- df_unconfound %>%
-        group_by(uniprot_iso) %>%
-        filter(n_distinct(is_mod) == 2) %>%
-        ungroup()
-}
+# if (only_protadj) {
+#     df_unconfound <- df_unconfound %>%
+#         group_by(uniprot_iso) %>%
+#         filter(n_distinct(is_mod) == 2) %>%
+#         ungroup()
+# }
 
 # df_work <- df_work %>% inner_join(df_unconfound)
 df_work <- df_work %>% 
@@ -285,12 +295,12 @@ site_full <- df_work %>%
     filter(nb_run == nb_run_design) %>% 
     distinct(protein, site)
 
-if (only_protadj) {
-    site_full <- site_full %>% 
-        group_by(protein) %>% 
-        filter(n_distinct(site == "None") == 2) %>% 
-        ungroup()
-}
+# if (only_protadj) {
+#     site_full <- site_full %>% 
+#         group_by(protein) %>% 
+#         filter(n_distinct(site == "None") == 2) %>% 
+#         ungroup()
+# }
 
 df_site <- df_work %>% 
     semi_join(site_full)
@@ -326,13 +336,17 @@ df_sum <- nested_site %>%
     unnest(sumdata) %>% 
     left_join(run2group)
 
-# Whole-plot modeling
-nested_perbch <- nest_site(df_sum, w_batch = FALSE)
-nested_allbch <- nest_site(df_sum, w_batch = TRUE)
+# # Whole-plot modeling
+# nested_perbch <- nest_site(df_sum, w_batch = FALSE)
+# nested_allbch <- nest_site(df_sum, w_batch = TRUE)
+# 
+# # Extract estimated model parameters
+# param_perbch <- extract_param(nested_perbch)
+# param_allbch <- extract_param(nested_allbch)
 
-# Extract estimated model parameters
-param_perbch <- extract_param(nested_perbch)
-param_allbch <- extract_param(nested_allbch)
+# Whole-plot modeling
+param_perbch <- model_ptm(df_sum, w_batch = FALSE)
+param_allbch <- model_ptm(df_sum, w_batch = TRUE)
 
 
 # Site-level differential analysis ----------------------------------------
@@ -342,7 +356,6 @@ controls <- c("mdp_30")
 
 # cases <- c("mdp_30")
 # controls <- c("ctrl")
-
 # cases <- c("cmpd89_mdp_30", "mdp_30")
 # controls <- c("mdp_30", "ctrl")
 
@@ -352,17 +365,13 @@ for (i in seq_along(cases)) {
     grp_case <- cases[i]
     # Per-batch model
     test_1[[i]] <- compare_mod(param_perbch, grp_ctrl, grp_case, protadj = FALSE) %>% 
-        # mutate(hyp = "null1") %>% 
         mutate(model = "per-batch", protadj = "no adjustment")
     test_2[[i]] <- compare_mod(param_perbch, grp_ctrl, grp_case, protadj = TRUE) %>% 
-        # mutate(hyp = "null2") %>% 
         mutate(model = "per-batch", protadj = "protein adjustment")
     # All-batch model
     test_3[[i]] <- compare_mod(param_allbch, grp_ctrl, grp_case, protadj = FALSE) %>% 
-        # mutate(hyp = "null3") %>% 
         mutate(model = "all-batch", protadj = "no adjustment")
     test_4[[i]] <- compare_mod(param_allbch, grp_ctrl, grp_case, protadj = TRUE) %>% 
-        # mutate(hyp = "null4") %>% 
         mutate(model = "all-batch", protadj = "protein adjustment")
     
     # Append unadjustable results (EXPERIMENTAL)
@@ -370,14 +379,12 @@ for (i in seq_along(cases)) {
         test_2[[i]], 
         test_1[[i]] %>% 
             anti_join(test_2[[i]] %>% select(protein, site)) %>% 
-            # mutate(hyp = "null2") %>% 
             mutate(model = "per-batch", protadj = "protein adjustment")
     )
     test_4[[i]] <- bind_rows(
         test_4[[i]], 
         test_3[[i]] %>% 
             anti_join(test_4[[i]] %>% select(protein, site)) %>% 
-            # mutate(hyp = "null4") %>% 
             mutate(model = "all-batch", protadj = "protein adjustment")
     )
 
@@ -388,12 +395,6 @@ test_res <- bind_rows(test_1, test_2, test_3, test_4) %>%
     mutate(p_adjusted = p.adjust(p_value, method = "BH")) %>% 
     ungroup()
 test_res$p_adjusted[test_res$log2FC %in% c(Inf, -Inf)] <- 0  # Missing in one group
-
-# test_res <- test_res %>% 
-#     mutate(
-#         model = ifelse(hyp %in% c("null1", "null2"), "per-batch", "all-batch"), 
-#         protadj = ifelse(hyp %in% c("null2", "null4"), "protein adjustment", "no adjustment")
-#     )
 
 
 # Site-level results ------------------------------------------------------
