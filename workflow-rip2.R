@@ -44,18 +44,20 @@ rm(list = ls()[!(ls() %in% c("df_design", "dta_rip2"))])
 # Parameters
 site_spec <- TRUE  # Site-level analysis; default TRUE
 # site_spec <- FALSE  # Site-level analysis; default TRUE
-only_protadj <- FALSE  # Ignore unadjustable PTM; default FALSE
-min_len_peptide <- 6  # Minimum acceptable length of peptide
+mlen_peptide <- 6  # Minimum acceptable length of peptide
 
 # Modifications of interest
 mod_residue <- "K"
 mod_symbol <- "\\*"
 
+# Expected protein pattern
+protein_pattern <- regex("([OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2})([-]\\d{1,}){0,1}")
+
 # Load prepared dataset
 load("output/dta_rip2.RData")
 
 df_work <- dta_rip2
-# rm(dta_rip2)
+rm(dta_rip2)
 
 # Initial filtering
 #  - ignore threshold of vista score
@@ -94,18 +96,9 @@ df_design <- tbl_df(df_design) %>%
 # Read fasta annotation
 hs_fasta <- tidy_fasta("data/Sequence/homo_sapiens_all_20160725.fasta")
 
-# load("output/uniprot_inf.RData")
-# hs_fasta <- hs_fasta %>%
-#     dplyr::mutate(
-#         uniprot_ac = stringr::str_extract(header, pattern = regex_uniprot_ac),
-#         uniprot_iso = stringr::str_extract(header, pattern = regex_uniprot_iso),
-#         entry_name = stringr::str_extract(header, pattern = "([^\\s\\|]*)(?=\\s)")
-#     )
-
-
 df_work <- df_work %>% 
     rename(entry_name = Reference) %>% 
-    left_join(hs_fasta %>% distinct(uniprot_ac, entry_name)) %>% 
+    inner_join(hs_fasta %>% distinct(uniprot_ac, entry_name)) %>% 
     rename(uniprot_iso = uniprot_ac)
 
 df_work <- df_work %>% 
@@ -124,30 +117,13 @@ df_work <- df_work %>%
     summarise(log2inty = max(log2inty)) %>% 
     ungroup()
 
-# Remove peptides with ambiguous matches (to >1 uniprot isoforms)
-# uniq_pep <- df_work %>% 
-#     distinct(peptide, uniprot_iso) %>% 
-#     count(peptide) %>% 
-#     filter(n == 1) %>% 
-#     .$peptide
-# df_work <- df_work %>% filter(peptide %in% uniq_pep)
-
-# Remove features exclusively observed in one batch
-# df_work <- df_work %>%
-#     group_by(feature, batch) %>%
-#     filter(n() != 1) %>% 
-#     ungroup()
-
 
 # Site representation for modified peptides -------------------------------
 
 # Annotate potential modification sites on protein sequences
 hs_fasta <- hs_fasta %>% 
-    mutate(
-        idx_site_all = str_locate_all(sequence, mod_residue) %>% map(~.[, "start"]), 
-        aa_site_all = str_extract_all(sequence, mod_residue)
-    ) %>% 
-    select(uniprot_ac, uniprot_iso, entry_name, idx_site_all, aa_site_all, header, sequence) %>% 
+    mutate(idx_site_prot = str_locate_all(sequence, mod_residue) %>% map(~.[, "start"])) %>% 
+    select(uniprot_ac, uniprot_iso, entry_name, idx_site_prot, header, sequence) %>% 
     arrange(uniprot_iso)
 
 # Observed peptide sequence & other information
@@ -156,28 +132,25 @@ df_mod <- df_work %>%
     mutate(
         peptide_trimmed = str_extract(peptide, "(?<=\\.)([ACDEFGHIKLMNPQRSTVWY\\*]+)"), 
         peptide_unmod = str_replace_all(peptide, mod_symbol, ""), 
-        peptide_unmod_trimmed = str_extract(peptide_unmod, "(?<=\\.)([ACDEFGHIKLMNPQRSTVWY\\*]+)"), 
-        len_peptide = str_length(peptide_unmod_trimmed)
+        peptide_unmod_trimmed = str_extract(peptide_unmod, "(?<=\\.)([ACDEFGHIKLMNPQRSTVWY\\*]+)")
     ) %>% 
     arrange(uniprot_iso)
 
 # Retain peptides with length >= 6
-regex_uniprot_iso <- regex("([OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2})([-]\\d{1,}){0,1}")
-# regex_uniprot <- ".*([OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}).*"
 df_mod <- df_mod %>% 
-    filter(len_peptide >= min_len_peptide, str_detect(uniprot_iso, regex_uniprot_iso))
+    filter(str_length(peptide_unmod_trimmed) >= mlen_peptide)
 
 # Integrate fasta information with observed peptides
 # [TODO]: use extended AAs for more specific matching
 df_fasmod <- df_mod %>% 
-    inner_join(hs_fasta %>% select(uniprot_iso, sequence, idx_site_all)) %>% 
-    mutate(rng_peptide = str_locate_all(sequence, peptide_unmod_trimmed)) %>% 
-    mutate(nb_mch = map_int(rng_peptide, ~ nrow(.)))
+    inner_join(hs_fasta %>% select(uniprot_iso, sequence, idx_site_prot)) %>% 
+    mutate(idx_peptide = str_locate_all(sequence, peptide_unmod_trimmed)) %>% 
+    mutate(nb_mch = map_int(idx_peptide, ~ nrow(.)))
 
 # Ignoring non-specific matching (peptide mapped to 0 or >1 locations of protein)
 df_fasmod <- df_fasmod %>% 
     filter(nb_mch == 1) %>% 
-    mutate(aa_start = map_int(rng_peptide, ~.[, "start"]))
+    mutate(aa_start = map_int(idx_peptide, ~.[, "start"]))
 
 # Observed modification sites
 mod_resymb <- str_c(mod_residue, mod_symbol)
@@ -187,50 +160,29 @@ df_fasmod <- df_fasmod %>%
         idx_mod = pmap(list(peptide_trimmed, aa_start, mod_resymb), locate_mod)
     ) %>% 
     mutate(
-        nb_site = map_int(idx_site, length), 
-        nb_mod = map_int(idx_mod, length), 
-        len_site = map(idx_site_all, ~str_length(.[length(.)])), 
-        site = pmap_chr(list(idx_mod, mod_residue, len_site), annot_site), 
-        # site = map2_chr(idx_mod, idx_site_all, annotate_site, mod_residue), 
-        peptide_str = map_chr(rng_peptide, ~ str_c(., collapse = "-")), 
-        full_site_str = str_c(uniprot_iso, peptide_str, site, sep = "_")
+        len_site = map(idx_site_prot, ~ str_length(.[length(.)])), 
+        site = pmap_chr(list(idx_mod, mod_residue, len_site), annot_site)
     ) %>% 
-    select(uniprot_iso, peptide, peptide_unmod, nb_site, nb_mod, is_mod, 
-           idx_site, idx_mod, site, peptide_str, full_site_str)
-
-# Check if unmodified peptides have a site modified elsewhere
-# Firstly, find protein with at least one unmodified peptide/site (to be checked)
-nested_w_unmod <- df_fasmod %>% 
-    group_by(uniprot_iso) %>% 
-    filter(any(!is_mod)) %>% 
-    nest()
-# Secondly, compare the unmodified peptides with modified sites
-nested_w_unmod <- nested_w_unmod %>% 
-    mutate(unmod_data = map(data, ~filter(., !is_mod))) %>% 
-    mutate(site_mod_prot = map(data, ~unlist(.$idx_mod))) %>% 
-    mutate(unmod_data = map2(unmod_data, site_mod_prot, ~mutate(.x, w_mod = idx_site %in% .y)))
+    select(uniprot_iso, peptide, peptide_unmod, is_mod, idx_site, idx_mod, site)
 
 # Restrict on peptides modified on 1 site and unmodified peptides with no site modified elsewhere
-# (Another option) Restrict on peptides modified on 1 site and unmodified peptides with no site
-df_unconfound <- bind_rows(
-    nested_w_unmod %>% unnest(unmod_data) %>% filter(!w_mod) %>% 
-        select(uniprot_iso, peptide, is_mod, site), 
-    df_fasmod %>% filter(nb_mod == 1) %>% 
-        select(uniprot_iso, peptide, is_mod, site)
-)
+uncfd_unmod <- df_fasmod %>% 
+    group_by(uniprot_iso) %>% 
+    mutate(idx_mod_prot = list(unique(unlist(idx_mod)))) %>% 
+    ungroup() %>% 
+    filter(!is_mod) %>% 
+    filter(map2_lgl(idx_site, idx_mod_prot, ~ !any(.x %in% .y))) %>% 
+    select(uniprot_iso, peptide, is_mod, site)
 
-# Proteins eligible for protein-level adjustment
-# if (only_protadj) {
-#     df_unconfound <- df_unconfound %>%
-#         group_by(uniprot_iso) %>%
-#         filter(n_distinct(is_mod) == 2) %>%
-#         ungroup()
-# }
+uncfd <- df_fasmod %>% 
+    filter(map_int(idx_mod, length) == 1) %>% 
+    select(uniprot_iso, peptide, is_mod, site) %>% 
+    bind_rows(uncfd_unmod)
 
-# df_work <- df_work %>% inner_join(df_unconfound)
 df_work <- df_work %>% 
-    inner_join(df_unconfound) %>% 
+    inner_join(uncfd) %>% 
     rename(protein = uniprot_iso)
+
 
 # Visualization -----------------------------------------------------------
 
@@ -278,7 +230,8 @@ df_work <- normalize_ptm(df_work)
 
 # Annotation for either site-level analysis or protein-level analysis
 if (!site_spec) {
-    df_work <- df_work %>% mutate(site = ifelse(site == "None", "None", "MOD"))
+    df_work <- df_work %>% 
+        mutate(site = ifelse(site == "None", "None", "MOD"))
 }
 
 # Fully observed sites (in at least one conditions)
@@ -303,6 +256,7 @@ df_site <- df_work %>%
 
 # Imputation and summarization --------------------------------------------
 
+# Nested data frame
 if ("batch" %in% names(df_site)) {
     nested_site <- df_site %>%
         group_by(protein, site, batch) %>%
@@ -316,20 +270,21 @@ if ("batch" %in% names(df_site)) {
 nested_site <- nested_site %>% 
     mutate(data = map(data, ~ complete(., feature, nesting(run, group))))
 
+# Missing value imputation
 nested_site <- nested_site %>% 
     mutate(aftdata = map(data, fill_censored_aft))
 
+# Summarization
 nested_site <- nested_site %>% 
     mutate(sumdata = map(aftdata, summarize_feature, "tmp"))
 
-
-# Fit per-batch and all-batch models --------------------------------------
-# Add group information
-run2group <- df_site %>% 
-    distinct(run, group)
+# Run-level summaries with grouping information
 df_sum <- nested_site %>% 
     unnest(sumdata) %>% 
-    left_join(run2group)
+    left_join(df_site %>% distinct(run, group))
+
+
+# Fit per-batch and all-batch models --------------------------------------
 
 # # Whole-plot modeling
 # nested_perbch <- nest_site(df_sum, w_batch = FALSE)
