@@ -1,7 +1,6 @@
 # Load libraries and sources ----------------------------------------------
 
 library(tidyverse)
-library(stringr)
 library(broom)
 library(survival)
 
@@ -44,6 +43,7 @@ rm(list = ls()[!(ls() %in% c("df_design", "dta_rip2"))])
 
 # Parameters
 site_spec <- TRUE  # Site-level analysis; default TRUE
+# site_spec <- FALSE  # Site-level analysis; default TRUE
 only_protadj <- FALSE  # Ignore unadjustable PTM; default FALSE
 min_len_peptide <- 6  # Minimum acceptable length of peptide
 
@@ -58,8 +58,10 @@ df_work <- dta_rip2
 # rm(dta_rip2)
 
 # Initial filtering
+#  - ignore threshold of vista score
 df_work <- df_work %>% 
-    filter(vista_confidence_score >= 83, !is.na(ms2_charge), !is.na(ms2_rt)) %>%
+    filter(!is.na(ms2_charge), !is.na(ms2_rt)) %>% 
+    # filter(vista_confidence_score >= 83, !is.na(ms2_charge), !is.na(ms2_rt)) %>%
     select(-vista_confidence_score, -peptide_trypticity, 
            -peptide_miscleavages, -peptide_validity) %>% 
     rename(peptide = peptide_sequence)
@@ -91,6 +93,15 @@ df_design <- tbl_df(df_design) %>%
 
 # Read fasta annotation
 hs_fasta <- tidy_fasta("data/Sequence/homo_sapiens_all_20160725.fasta")
+
+# load("output/uniprot_inf.RData")
+# hs_fasta <- hs_fasta %>%
+#     dplyr::mutate(
+#         uniprot_ac = stringr::str_extract(header, pattern = regex_uniprot_ac),
+#         uniprot_iso = stringr::str_extract(header, pattern = regex_uniprot_iso),
+#         entry_name = stringr::str_extract(header, pattern = "([^\\s\\|]*)(?=\\s)")
+#     )
+
 
 df_work <- df_work %>% 
     rename(entry_name = Reference) %>% 
@@ -133,27 +144,11 @@ df_work <- df_work %>%
 # Annotate potential modification sites on protein sequences
 hs_fasta <- hs_fasta %>% 
     mutate(
-        rng_site_all = str_locate_all(sequence, mod_residue), 
-        idx_site_all = map(rng_site_all, ~.[, "start"]), 
-        aa_site_all = str_match_all(sequence, mod_residue), 
-        aa_site_all = map(aa_site_all, ~.[, 1])
+        idx_site_all = str_locate_all(sequence, mod_residue) %>% map(~.[, "start"]), 
+        aa_site_all = str_extract_all(sequence, mod_residue)
     ) %>% 
     select(uniprot_ac, uniprot_iso, entry_name, idx_site_all, aa_site_all, header, sequence) %>% 
     arrange(uniprot_iso)
-
-# hs_fasta <- hs_fasta %>% 
-#     mutate(
-#         rng_site_all = str_locate_all(sequence, mod_residue), 
-#         aa_site_all = str_match_all(sequence, mod_residue)
-#     ) %>% 
-#     mutate(
-#         idx_site_all = map(rng_site_all, ~.[, "start"]), 
-#         aa_site_all = map(aa_site_all, ~.[, 1])
-#     )
-# 
-# hs_fasta <- hs_fasta %>% 
-#     select(uniprot_ac, uniprot_iso, entry_name, idx_site_all, aa_site_all, header, sequence) %>% 
-#     arrange(uniprot_iso)
 
 # Observed peptide sequence & other information
 df_mod <- df_work %>% 
@@ -429,7 +424,10 @@ test_res_prop <- test_res_prop %>%
 test_res_prop %>% 
     ggplot(aes(log2FC, -log10(p_adjusted), color = col_sig)) + 
     geom_point(aes(color = col_sig), alpha = 0.75, size = 3) +
-    geom_hline(yintercept = -log10(0.05), color = "gray20") + 
+    geom_hline(yintercept = 0, color = "gray20") + 
+    geom_hline(yintercept = -log10(0.05), color = "darkred", linetype = "dashed") + 
+    geom_vline(xintercept = 0, color = "gray20") + 
+    geom_vline(xintercept = c(-2, 2), color = "darkred", linetype = "dashed") + 
     scale_color_manual(
         values = c("gray65", "blue", "red"), 
         limits = c("nonsig", "dnreg", "upreg"), 
@@ -541,8 +539,11 @@ dev.off()
 # Significant site changes ------------------------------------------------
 
 test_res <- test_res %>% 
-    mutate(protsite = str_replace(protsite, "--", " (") %>% str_c(")")) %>%
-    select(protsite, contrast, log2FC, std_error, DF, statistic, p_value, p_adjusted, model, protadj)
+    select(protein, site, contrast, log2FC, std_error, DF, statistic, p_value, p_adjusted, model, protadj)
+# test_res <- test_res %>% 
+#     mutate(protsite = str_replace(protsite, "--", " (") %>% str_c(")")) %>%
+#     select(protsite, contrast, log2FC, std_error, DF, statistic, p_value, p_adjusted, model, protadj)
+
 
 if (site_spec) {
     write_csv(test_res, "output/rip2-tmp-4mdl.csv")
